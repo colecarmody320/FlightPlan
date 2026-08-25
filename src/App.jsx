@@ -784,28 +784,108 @@ function Mark() {
   );
 }
 
-/* ---------- compass rose watermark ---------- */
-function Rose() {
+/* ---------- runway streak markers ---------- */
+const pad2 = (n) => (n < 10 ? `0${n}` : `${n}`);
+
+function Runway({ label, value, unit }) {
+  const lit = value > 0;
   return (
-    <svg className="rose" viewBox="0 0 200 200" aria-hidden="true">
-      <circle cx="100" cy="100" r="92" />
-      <circle cx="100" cy="100" r="72" />
-      {Array.from({ length: 36 }, (_, i) => {
-        const a = (i * 10 * Math.PI) / 180;
-        const long = i % 9 === 0;
-        return (
-          <line
-            key={i}
-            x1={100 + 92 * Math.sin(a)}
-            y1={100 - 92 * Math.cos(a)}
-            x2={100 + (long ? 74 : 84) * Math.sin(a)}
-            y2={100 - (long ? 74 : 84) * Math.cos(a)}
-            className={long ? "rose-major" : ""}
-          />
-        );
-      })}
-      <polygon points="100,16 106,50 100,44 94,50" className="rose-n" />
+    <div className={lit ? "rwy lit" : "rwy"}>
+      <svg viewBox="0 0 60 132" aria-label={`${label}: ${value} ${unit}`}>
+        <rect x="8" y="0" width="44" height="132" rx="3" className="rwy-deck" />
+        <line x1="11.5" y1="4" x2="11.5" y2="128" className="rwy-edge" />
+        <line x1="48.5" y1="4" x2="48.5" y2="128" className="rwy-edge" />
+        <g className="rwy-keys">
+          {[0, 1, 2, 3, 4, 5].map((i) => (
+            <rect key={i} x={14 + i * 6.2} y="6" width="3" height="17" rx="1" />
+          ))}
+        </g>
+        <line x1="30" y1="30" x2="30" y2="92" className="rwy-center" />
+        <text x="30" y="120" className="rwy-num">
+          {value > 99 ? value : pad2(value)}
+        </text>
+      </svg>
+      <p className="rwy-label">{label}</p>
+      <p className="rwy-unit">{unit}</p>
+    </div>
+  );
+}
+
+/* ---------- propeller watermark ---------- */
+function Prop() {
+  const blade =
+    "M 100 96 C 107 64, 109 32, 100 10 C 91 32, 93 64, 100 96 Z";
+  return (
+    <svg className="prop" viewBox="0 0 200 200" aria-hidden="true">
+      <g className="prop-disc">
+        <circle cx="100" cy="100" r="86" />
+        <circle cx="100" cy="100" r="72" />
+      </g>
+      <g className="prop-blades">
+        <path d={blade} />
+        <path d={blade} transform="rotate(120 100 100)" />
+        <path d={blade} transform="rotate(240 100 100)" />
+        <circle cx="100" cy="100" r="13" className="prop-hub" />
+        <circle cx="100" cy="100" r="5" className="prop-bolt" />
+      </g>
     </svg>
+  );
+}
+
+/* ---------- live METAR from KBTL (Battle Creek) ---------- */
+const STATION = "KBTL";
+const METAR_URL = `https://aviationweather.gov/api/data/metar?ids=${STATION}&format=json`;
+
+function useMetar() {
+  const [state, setState] = useState({ raw: null, fetchedAt: null, error: null });
+
+  useEffect(() => {
+    let dead = false;
+
+    const pull = async () => {
+      try {
+        const res = await fetch(METAR_URL, { cache: "no-store" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = await res.json();
+        const raw = Array.isArray(json) ? json[0]?.rawOb : json?.rawOb;
+        if (!raw) throw new Error("no observation returned");
+        if (!dead) setState({ raw, fetchedAt: Date.now(), error: null });
+      } catch (e) {
+        // keep whatever we already have; just note the failure
+        if (!dead) setState((s) => ({ ...s, error: e.message }));
+      }
+    };
+
+    pull();
+    const t = setInterval(pull, 10 * 60 * 1000);
+    return () => {
+      dead = true;
+      clearInterval(t);
+    };
+  }, []);
+
+  return state;
+}
+
+function MetarStrip() {
+  const { raw, fetchedAt, error } = useMetar();
+
+  if (!raw) {
+    return (
+      <span style={S.dim}>
+        {error ? `${STATION} — weather unavailable (${error})` : `${STATION} — fetching…`}
+      </span>
+    );
+  }
+
+  const mins = fetchedAt ? Math.round((Date.now() - fetchedAt) / 60000) : 0;
+
+  return (
+    <>
+      <Atis text={raw} />
+      {error && <span style={S.dim}> · stale</span>}
+      {!error && mins > 0 && <span style={S.dim}> · {mins}m ago</span>}
+    </>
   );
 }
 
@@ -915,9 +995,6 @@ function Greeting({ data, go }) {
     return pool[Math.floor(Math.random() * pool.length)];
   }, [band]);
 
-  // typed once per mount so it doesn't retype on every keystroke elsewhere
-  const strip = useMemo(() => statusStrip(data), []);
-
   const graded = live(data).map((c) => courseGrade(c).current).filter((x) => x !== null);
   const gpa = graded.length
     ? graded.reduce((s, p) => s + GPA_PTS[letterFor(p)], 0) / graded.length
@@ -934,9 +1011,14 @@ function Greeting({ data, go }) {
   const gymTarget = Number(data.personal?.gymTarget || 0);
   const milesTarget = Number(data.personal?.milesTarget || 0);
 
+  const workouts = data.personal?.workouts || [];
+  const studyDayStreak = studyStreak(data.sessions);
+  const liftStreak = weeklyStreak(workouts, gymTarget);
+  const runStreak = milesStreak(workouts, milesTarget);
+
   return (
     <div style={S.heroWrap}>
-      <Rose />
+      <Prop />
 
       <p style={S.eyebrow} className="hero">
         {new Date()
@@ -972,10 +1054,13 @@ function Greeting({ data, go }) {
           </p>
         </div>
 
-        <div className="tile">
-          <p style={S.tileLabel}>Cards ready</p>
-          <p style={S.tileValue}><Drum value={due} /></p>
-          <p style={S.tileNote}>{due ? "review waiting" : "all caught up"}</p>
+        <div className="tile wide">
+          <p style={S.tileLabel}>Streaks</p>
+          <div className="rwy-row">
+            <Runway label="Studying" value={studyDayStreak} unit="days" />
+            <Runway label="Lifting" value={liftStreak} unit="weeks" />
+            <Runway label="Running" value={runStreak} unit="weeks" />
+          </div>
         </div>
 
         <div className="tile gauge-tile">
@@ -1011,7 +1096,7 @@ function Greeting({ data, go }) {
       </div>
 
       <p style={S.strip} className="hero-3">
-        <Atis text={strip} />
+        <MetarStrip />
       </p>
     </div>
   );
@@ -1178,7 +1263,7 @@ export default function CollegeHub() {
       <div style={{ ...S.page, ...cabin.vars }} className={`hub ${cabin.phase}`}>
         <style>{CSS}</style>
         <div style={{ paddingTop: 90, maxWidth: 520, position: "relative" }}>
-          <Rose />
+          <Prop />
           <p style={S.eyebrow} className="hero">FLIGHTPLAN</p>
           <h1 className="hero-h hero" style={{ marginTop: 14 }}>
             Your data, <em>everywhere</em>.
@@ -3771,6 +3856,7 @@ const CSS = `
 
   /* header */
   .hub .bar {
+    position: relative; z-index: 5;
     display: flex; align-items: center; gap: 18px;
     padding: 14px 0;
     margin-bottom: 8px;
@@ -3887,30 +3973,48 @@ const CSS = `
     100% { transform: none; opacity: 1; }
   }
 
-  /* compass rose watermark */
-  .hub .rose {
+  /* propeller watermark — spins up on load, then coasts down */
+  .hub .prop {
     position: absolute;
-    right: -30px; top: 10px;
-    width: 300px; height: 300px;
+    right: -20px; top: 40px;
+    width: 280px; height: 280px;
     pointer-events: none;
-    opacity: .10;
+    z-index: 0;
+  }
+  .hub .prop-blades {
+    fill: var(--green-bright);
+    opacity: .13;
+    transform-origin: 100px 100px;
+    animation: propSpin 2.8s cubic-bezier(.12,.72,.24,1) both;
+  }
+  .hub .prop-hub { fill: var(--green); opacity: .5; }
+  .hub .prop-bolt { fill: var(--bone); opacity: .3; }
+  .hub .prop-disc {
     fill: none;
     stroke: var(--green-bright);
     stroke-width: 1;
-    animation: roseIn 2.4s cubic-bezier(.22,.61,.36,1) both;
+    stroke-dasharray: 3 9;
+    opacity: 0;
+    transform-origin: 100px 100px;
+    animation: propWash 2.8s cubic-bezier(.12,.72,.24,1) both;
   }
-  .hub .rose .rose-major { stroke-width: 2; }
-  .hub .rose .rose-n { fill: var(--green-bright); stroke: none; }
-  @keyframes roseIn {
-    from { opacity: 0; transform: rotate(-14deg) scale(.94); }
-    to   { opacity: .10; transform: none; }
+  @keyframes propSpin {
+    from { transform: rotate(0deg); opacity: .04; }
+    30%  { opacity: .13; }
+    to   { transform: rotate(1044deg); opacity: .13; }
+  }
+  @keyframes propWash {
+    0%   { transform: rotate(0deg); opacity: 0; }
+    35%  { opacity: .16; }
+    to   { transform: rotate(-620deg); opacity: .05; }
   }
 
   /* stat tiles */
   .hub .tiles {
     display: grid; gap: 10px; margin-top: 26px;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(6, minmax(0, 1fr));
   }
+  .hub .tile.wide { grid-column: span 2; }
   .hub .tile {
     position: relative;
     border: 1px solid var(--line);
@@ -3924,6 +4028,50 @@ const CSS = `
   .hub .tile:hover { border-color: var(--edge); transform: translateY(-2px); }
   .hub .gauge-tile { text-align: center; }
   .hub .gauge-tile .dial { margin: 6px auto 2px; display: block; }
+
+  /* runway streak markers */
+  .hub .rwy-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .hub .rwy { text-align: center; min-width: 0; }
+  .hub .rwy svg { width: 100%; max-width: 54px; height: auto; display: block; margin: 0 auto; }
+  .hub .rwy-deck { fill: rgba(9,13,11,.72); stroke: var(--line); stroke-width: 1; }
+  .hub .rwy-edge { stroke: var(--faint); stroke-width: 1.4; opacity: .55; }
+  .hub .rwy-keys rect { fill: var(--faint); opacity: .5; }
+  .hub .rwy-center {
+    stroke: var(--bone);
+    stroke-width: 2.4;
+    stroke-dasharray: 8 9;
+    opacity: .3;
+    animation: rwyRoll 2.6s linear infinite;
+  }
+  @keyframes rwyRoll { from { stroke-dashoffset: 34; } to { stroke-dashoffset: 0; } }
+  .hub .rwy-num {
+    fill: var(--bone);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 25px;
+    font-weight: 500;
+    letter-spacing: .06em;
+    text-anchor: middle;
+    opacity: .45;
+  }
+  .hub .rwy.lit .rwy-num { fill: var(--green-bright); opacity: 1; }
+  .hub .rwy.lit .rwy-keys rect { fill: var(--green-bright); opacity: .75; }
+  .hub .rwy.lit .rwy-center { opacity: .5; }
+  .hub .rwy-label {
+    font-size: 11px; font-weight: 600;
+    color: var(--bone);
+    margin: 6px 0 0;
+  }
+  .hub .rwy-unit {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--faint);
+    margin: 1px 0 0;
+  }
 
   /* instrument dial */
   .hub .dial-face  { fill: rgba(9,13,11,.55); }
@@ -4110,15 +4258,16 @@ const CSS = `
 
   @media (prefers-reduced-motion: reduce) {
     .hub .hero, .hub .hero-2, .hub .hero-3, .hub .view, .hub .panel,
-    .hub .flip, .hub .plane, .hub .rose, .hub .horizon,
+    .hub .flip, .hub .plane, .hub .prop-blades, .hub .prop-disc, .hub .horizon,
     .hub .walk .panel::before, .hub .sock polygon,
-    .hub .nav-red, .hub .nav-green, .hub .caret { animation: none; }
+    .hub .nav-red, .hub .nav-green, .hub .caret, .hub .rwy-center { animation: none; }
     .hub .dial-needle, .hub .drum-col, .hub .gauge span, .hub .tile, .hub .sock { transition: none; }
   }
 
   @media (max-width: 940px) {
-    .hub .tiles { grid-template-columns: repeat(3, 1fr); }
-    .hub .rose { width: 220px; right: -60px; opacity: .07; }
+    .hub .tiles { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .hub .tile.wide { grid-column: span 2; }
+    .hub .prop { width: 210px; right: -50px; top: 30px; }
   }
 
   @media (max-width: 720px) {
@@ -4127,11 +4276,14 @@ const CSS = `
     .hub .bar { gap: 10px; padding: 12px 0; }
     .hub .cta-desktop { display: none; }
 
-    .hub .tiles { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .hub .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .hub .tile.wide { grid-column: span 2; }
+    .hub .rwy svg { max-width: 62px; }
+    .hub .rwy-num { font-size: 23px; }
     .hub .tile { padding: 12px; }
     .hub .gauge-tile .dial { width: 62px; height: 62px; }
     .hub .tab { font-size: 13px; padding: 6px 9px; }
-    .hub .rose { display: none; }
+    .hub .prop { display: none; }
 
     .hub .sock-wrap { right: 8px; bottom: 8px; transform: scale(.8); transform-origin: bottom right; }
 
@@ -4191,8 +4343,9 @@ const S = {
     marginTop: 26,
     paddingTop: 14,
     borderTop: "1px solid #26362E",
-    wordSpacing: ".2em",
+    wordSpacing: ".16em",
     minHeight: 30,
+    lineHeight: 1.7,
   },
   tileLabel: {
     fontFamily: MONO,
