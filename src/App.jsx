@@ -837,7 +837,7 @@ function Prop() {
 
 /* ---------- live METAR from KBTL (Battle Creek) ---------- */
 const STATION = "KBTL";
-const METAR_URL = `https://aviationweather.gov/api/data/metar?ids=${STATION}&format=json`;
+const METAR_URL = "https://flightplan-metar.nicholasmcarmody.workers.dev/";
 
 function useMetar() {
   const [state, setState] = useState({ raw: null, fetchedAt: null, error: null });
