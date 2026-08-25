@@ -172,7 +172,10 @@ export function useCirrusConversation({ mode, page, selectedObject } = {}) {
       setState((s) => ({
         ...s,
         sending: false,
-        error: { code: result.code, message: result.message },
+        // `detail` is the backend's own description of the failure
+        // (e.g. which status the provider returned). Kept so the UI can
+        // show the actual cause rather than only the friendly summary.
+        error: { code: result.code, message: result.message, detail: result.detail },
         voiceState: WAVEFORM_STATES.READY,
       }));
     },

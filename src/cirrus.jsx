@@ -209,9 +209,17 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject }
                         </p>
                       )}
                       {conversation.error && (
-                        <p className="cirrus-error" role="status">
-                          {conversation.error.message}
-                        </p>
+                        <div className="cirrus-error" role="status">
+                          <p className="cirrus-error-msg">{conversation.error.message}</p>
+                          {/* The specific cause, when the backend gave one.
+                              Shown inline because there is no console to
+                              check on a tablet or phone. */}
+                          {conversation.error.detail && (
+                            <p className="cirrus-error-detail">
+                              {conversation.error.code}: {conversation.error.detail}
+                            </p>
+                          )}
+                        </div>
                       )}
                     </div>
 
@@ -388,10 +396,18 @@ export const CIRRUS_CSS = `
     border-radius: 12px 12px 12px 2px;
   }
   .cirrus-error {
-    margin: 0; font-size: 12px; line-height: 1.5;
-    color: var(--alert);
     border-left: 2px solid var(--alert);
     padding-left: 9px;
+  }
+  .cirrus-error-msg {
+    margin: 0; font-size: 12px; line-height: 1.5; color: var(--alert);
+  }
+  .cirrus-error-detail {
+    margin: 3px 0 0;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10.5px; line-height: 1.45;
+    color: var(--faint);
+    word-break: break-word;
   }
 
   .cirrus-suggestions { display: flex; flex-wrap: wrap; gap: 6px; flex: none; }
