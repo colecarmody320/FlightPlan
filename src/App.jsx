@@ -10,6 +10,7 @@ import {
   FlyingTab,
   ReadinessView,
 } from "./aviation.jsx";
+import { CIRRUS_CSS, migrateCirrus, CirrusDock } from "./cirrus.jsx";
 const ALLOWED_EMAIL = "nicholasmcarmody@gmail.com";
 
 /* ============================================================
@@ -95,6 +96,7 @@ const blank = () => ({
   personal: blankPersonal(),
   settings: blankSettings(),
   ...migrateAviation(null),
+  ...migrateCirrus(null),
 });
 
 function migrate(d) {
@@ -133,6 +135,7 @@ function migrate(d) {
     })),
     settings: { ...blankSettings(), ...(d.settings || {}) },
     ...migrateAviation(d),
+    ...migrateCirrus(d),
     personal: {
       ...blankPersonal(),
       ...(d.personal || {}),
@@ -1267,7 +1270,7 @@ export default function CollegeHub() {
 
   return (
     <div style={{ ...S.page, ...cabin.vars }} className={`hub ${cabin.phase}`}>
-      <style>{CSS + AV_CSS}</style>
+      <style>{CSS + AV_CSS + CIRRUS_CSS}</style>
 
       <header className="bar">
         <Mark
@@ -1315,6 +1318,7 @@ export default function CollegeHub() {
         <button style={S.btn} className="btn" onClick={signOut}>
           Sign out
         </button>
+        <CirrusDock data={data} update={update} />
       </header>
 
       <main key={tab} className={walking ? "view walk" : "view"}>
