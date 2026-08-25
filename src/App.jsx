@@ -1,5 +1,15 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { supabase } from "./supabase.js";
+import {
+  AV_CSS,
+  migrateAviation,
+  BriefingStrip,
+  MissionPanel,
+  CountdownPanel,
+  DailyPanel,
+  FlyingTab,
+  ReadinessView,
+} from "./aviation.jsx";
 const ALLOWED_EMAIL = "nicholasmcarmody@gmail.com";
 
 /* ============================================================
@@ -8,7 +18,6 @@ const ALLOWED_EMAIL = "nicholasmcarmody@gmail.com";
    Aviation-weighted, aviation-instrumented.
    ============================================================ */
 
-const KEY = "hub:v1";
 const uid = () => Math.random().toString(36).slice(2, 10);
 
 const todayISO = () => {
@@ -85,7 +94,7 @@ const blank = () => ({
   goals: [],
   personal: blankPersonal(),
   settings: blankSettings(),
-  reviewLog: {},
+  ...migrateAviation(null),
 });
 
 function migrate(d) {
@@ -121,7 +130,7 @@ function migrate(d) {
       ...g,
     })),
     settings: { ...blankSettings(), ...(d.settings || {}) },
-    reviewLog: d.reviewLog || {},
+    ...migrateAviation(d),
     personal: {
       ...blankPersonal(),
       ...(d.personal || {}),
@@ -486,38 +495,6 @@ function monthBuckets(workouts, gymTarget, milesTarget) {
   return Object.values(rows).sort((a, b) => b.key.localeCompare(a.key));
 }
 
-const reviewedOn = (data, day) => Number(data.reviewLog?.[day] || 0);
-const reviewedToday = (data) => reviewedOn(data, todayISO());
-const dailyCardTarget = (data) => Number(data.settings?.cardsPerDay || 0);
-
-function cardStreak(data) {
-  const target = dailyCardTarget(data);
-  if (!target) return 0;
-  let cursor = todayISO();
-  if (reviewedOn(data, cursor) < target) {
-    cursor = addDays(cursor, -1);
-    if (reviewedOn(data, cursor) < target) return 0;
-  }
-  let streak = 0;
-  while (reviewedOn(data, cursor) >= target) {
-    streak++;
-    cursor = addDays(cursor, -1);
-  }
-  return streak;
-}
-
-function dailyQueue(data, count) {
-  const today = todayISO();
-  const pool = data.cards;
-  const due = pool
-    .filter((c) => !c.due || c.due <= today)
-    .sort((a, b) => (a.due || "").localeCompare(b.due || ""));
-  const upcoming = pool
-    .filter((c) => c.due && c.due > today)
-    .sort((a, b) => a.due.localeCompare(b.due) || a.box - b.box);
-  return [...due, ...upcoming].slice(0, Math.max(0, count));
-}
-
 function studyStreak(sessions) {
   if (!sessions.length) return 0;
   const days = new Set(sessions.map((s) => s.date));
@@ -692,31 +669,6 @@ function Drum({ value, decimals = 0, suffix = "" }) {
   );
 }
 
-/* ---------- ATIS ticker ---------- */
-function Atis({ text }) {
-  const [n, setN] = useState(0);
-  useEffect(() => {
-    setN(0);
-    const t = setInterval(() => {
-      setN((x) => {
-        if (x >= text.length) {
-          clearInterval(t);
-          return x;
-        }
-        return x + 1;
-      });
-    }, 13);
-    return () => clearInterval(t);
-  }, [text]);
-
-  return (
-    <span>
-      {text.slice(0, n)}
-      {n < text.length && <span className="caret" />}
-    </span>
-  );
-}
-
 /* ---------- windsock: whole-system pace at a glance ---------- */
 function paceStrength(data) {
   const ws = weekStart();
@@ -832,63 +784,6 @@ function Prop() {
         <circle cx="100" cy="100" r="5" className="prop-bolt" />
       </g>
     </svg>
-  );
-}
-
-/* ---------- live METAR from KBTL (Battle Creek) ---------- */
-const STATION = "KBTL";
-const METAR_URL = "https://flightplan-metar.nicholasmcarmody.workers.dev/";
-
-function useMetar() {
-  const [state, setState] = useState({ raw: null, fetchedAt: null, error: null });
-
-  useEffect(() => {
-    let dead = false;
-
-    const pull = async () => {
-      try {
-        const res = await fetch(METAR_URL, { cache: "no-store" });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const json = await res.json();
-        const raw = Array.isArray(json) ? json[0]?.rawOb : json?.rawOb;
-        if (!raw) throw new Error("no observation returned");
-        if (!dead) setState({ raw, fetchedAt: Date.now(), error: null });
-      } catch (e) {
-        // keep whatever we already have; just note the failure
-        if (!dead) setState((s) => ({ ...s, error: e.message }));
-      }
-    };
-
-    pull();
-    const t = setInterval(pull, 10 * 60 * 1000);
-    return () => {
-      dead = true;
-      clearInterval(t);
-    };
-  }, []);
-
-  return state;
-}
-
-function MetarStrip() {
-  const { raw, fetchedAt, error } = useMetar();
-
-  if (!raw) {
-    return (
-      <span style={S.dim}>
-        {error ? `${STATION} — weather unavailable (${error})` : `${STATION} — fetching…`}
-      </span>
-    );
-  }
-
-  const mins = fetchedAt ? Math.round((Date.now() - fetchedAt) / 60000) : 0;
-
-  return (
-    <>
-      <Atis text={raw} />
-      {error && <span style={S.dim}> · stale</span>}
-      {!error && mins > 0 && <span style={S.dim}> · {mins}m ago</span>}
-    </>
   );
 }
 
@@ -1028,28 +923,6 @@ function timeBand() {
 
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
-function statusStrip(data) {
-  const now = new Date();
-  const stamp = `${String(now.getDate()).padStart(2, "0")}${String(now.getHours()).padStart(
-    2,
-    "0"
-  )}${String(now.getMinutes()).padStart(2, "0")}Z`;
-  const hours = (data.sessions.reduce((s, x) => s + Number(x.minutes), 0) / 60).toFixed(1);
-  const streak = studyStreak(data.sessions);
-  const avg = aviationAverage(data);
-  const ws = weekStart();
-  const gym = gymDays((data.personal?.workouts || []).filter((w) => w.date >= ws));
-  const mi = sumMiles((data.personal?.workouts || []).filter((w) => w.date >= ws));
-  return [
-    `KAZO ${stamp}`,
-    `STUDY ${hours}H`,
-    `STREAK ${streak}D`,
-    `AVGRADES ${avg === null ? "—" : avg.toFixed(1)}`,
-    `GYM ${gym}`,
-    `${mi} MI`,
-  ].join("  /  ");
-}
-
 function Greeting({ data, go }) {
   const band = timeBand();
   const line = useMemo(() => pick(GREETINGS[band]), [band]);
@@ -1155,12 +1028,14 @@ function Greeting({ data, go }) {
         </div>
       </div>
 
-      <p style={S.strip} className="hero-3">
-        <MetarStrip />
-      </p>
+      <div style={S.strip} className="hero-3">
+        <BriefingStrip data={data} />
+      </div>
     </div>
   );
 }
+
+const AV_HELP = { studyPriority, courseGrade, live, gymDays, sumMiles, weekStart };
 
 /* ============================================================
    APP
@@ -1312,7 +1187,7 @@ export default function CollegeHub() {
   if (authLoading) {
     return (
       <div style={{ ...S.page, ...cabin.vars }} className={`hub ${cabin.phase}`}>
-        <style>{CSS}</style>
+        <style>{CSS + AV_CSS}</style>
         <p style={{ paddingTop: 80, ...S.dim }}>Loading…</p>
       </div>
     );
@@ -1321,7 +1196,7 @@ export default function CollegeHub() {
   if (!user) {
     return (
       <div style={{ ...S.page, ...cabin.vars }} className={`hub ${cabin.phase}`}>
-        <style>{CSS}</style>
+        <style>{CSS + AV_CSS}</style>
         <div style={{ paddingTop: 90, maxWidth: 520, position: "relative" }}>
           <Prop />
           <p style={S.eyebrow} className="hero">FLIGHTPLAN</p>
@@ -1345,7 +1220,7 @@ export default function CollegeHub() {
   if (!data) {
     return (
       <div style={{ ...S.page, ...cabin.vars }} className={`hub ${cabin.phase}`}>
-        <style>{CSS}</style>
+        <style>{CSS + AV_CSS}</style>
         <p style={{ paddingTop: 80, ...S.dim }}>Loading FlightPlan…</p>
       </div>
     );
@@ -1353,7 +1228,7 @@ export default function CollegeHub() {
 
   return (
     <div style={{ ...S.page, ...cabin.vars }} className={`hub ${cabin.phase}`}>
-      <style>{CSS}</style>
+      <style>{CSS + AV_CSS}</style>
 
       <header className="bar">
         <Mark />
@@ -1367,6 +1242,7 @@ export default function CollegeHub() {
             ["grades", "Grades"],
             ["goals", "Goals"],
             ["personal", "Personal"],
+            ["flying", "Flying"],
             ["courses", "Courses"],
           ].map(([k, label]) => (
             <button
@@ -1398,12 +1274,13 @@ export default function CollegeHub() {
       </header>
 
       <main key={tab} className={walking ? "view walk" : "view"}>
-        {tab === "home" && <Home data={data} go={setTab} />}
+        {tab === "home" && <Home data={data} go={setTab} update={update} />}
         {tab === "cards" && <CardsTab data={data} update={update} />}
         {tab === "study" && <StudyTab data={data} update={update} />}
         {tab === "grades" && <GradesTab data={data} update={update} />}
         {tab === "goals" && <GoalsTab data={data} update={update} />}
         {tab === "personal" && <PersonalTab data={data} update={update} />}
+        {tab === "flying" && <FlyingTab data={data} update={update} />}
         {tab === "courses" &&
           (openCourse ? (
             <CourseDetail
@@ -1432,7 +1309,7 @@ export default function CollegeHub() {
 /* ============================================================
    HOME
    ============================================================ */
-function Home({ data, go }) {
+function Home({ data, go, update }) {
   const ranked = live(data)
     .map((c) => ({ course: c, ...studyPriority(c, data) }))
     .sort((a, b) => b.score - a.score);
@@ -1521,6 +1398,14 @@ function Home({ data, go }) {
         <Bar value={otherMin} max={otherGoal} />
       </Section>
 
+      <Section title="Today's mission">
+        <MissionPanel data={data} go={go} helpers={AV_HELP} />
+      </Section>
+
+      <Section title="Countdowns">
+        <CountdownPanel data={data} update={update} />
+      </Section>
+
       <Section title="Study this next">
         <ol style={S.list}>
           {ranked.slice(0, 4).map((r) => (
@@ -1568,6 +1453,10 @@ function Home({ data, go }) {
             </>
           );
         })()}
+      </Section>
+
+      <Section title="Daily">
+        <DailyPanel data={data} />
       </Section>
 
       <Section title="Goals">
@@ -1626,7 +1515,7 @@ function CardsTab({ data, update }) {
   return (
     <div>
       <nav style={S.subnav}>
-        {[["decks", "Decks"], ["browse", "Browse & edit"], ["add", "Add cards"]].map(([k, l]) => (
+        {[["decks", "Decks"], ["browse", "Browse & edit"], ["add", "Add cards"], ["ready", "Readiness"]].map(([k, l]) => (
           <button key={k} onClick={() => setView(k)} className={view === k ? "tab on" : "tab"}>
             {l}
           </button>
@@ -1635,6 +1524,7 @@ function CardsTab({ data, update }) {
       {view === "decks" && <Decks data={data} start={setReview} />}
       {view === "browse" && <Browse data={data} update={update} start={setReview} />}
       {view === "add" && <AddCards data={data} update={update} />}
+      {view === "ready" && <ReadinessView data={data} start={setReview} helpers={AV_HELP} />}
     </div>
   );
 }
