@@ -1333,7 +1333,14 @@ export default function CollegeHub() {
         <button style={S.btn} className="btn" onClick={signOut}>
           Sign out
         </button>
-        <CirrusDock data={data} update={update} open={cirrusOpen} setOpen={setCirrusOpen} />
+        <CirrusDock
+          data={data}
+          update={update}
+          open={cirrusOpen}
+          setOpen={setCirrusOpen}
+          page={tab}
+          selectedObject={openCourse ? { type: "course", id: openCourse } : null}
+        />
       </header>
 
       <main key={tab} className={walking ? "view walk" : "view"}>

@@ -1,41 +1,31 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useRef, useState, useEffect } from "react";
+import { CIRRUS_MODES, WAVEFORM_STATES } from "./cirrusShared.js";
+import { useCirrusConversation } from "./cirrusConversation.js";
 
 /* ============================================================
    CIRRUS — personal assistant layer
    Self-contained, like aviation.jsx. Inherits the .hub palette and
-   cabin lighting via CSS variables. Stage 1 is UI/state architecture
-   only: mode persistence, the waveform indicator, the header control,
-   the side-panel/bottom-sheet, and the Home strip. No provider calls
-   (Gemini/ElevenLabs/Calendar) are wired in yet — those land in later
-   stages behind the allowlisted-action/permission gate described in
-   the project brief. FlightPlan must work identically with this
-   module removed entirely; nothing here touches app data outside the
-   `cirrus` key, and panel visibility is deliberately NOT persisted —
-   it's ephemeral UI, kept separate from any future voice-session
-   state (listening/thinking/speaking), which later stages will add
-   without needing to touch open/collapsed at all.
+   cabin lighting via CSS variables. Stage 2 adds the centralized
+   personality/prompt architecture (cirrusPersonality.js) and the
+   ephemeral conversation-state hook (cirrusConversation.js) that
+   this component now consumes instead of hardcoding UI state. No
+   provider calls (Gemini/ElevenLabs/Calendar) are wired in yet —
+   those land in later stages behind the allowlisted-action/permission
+   gate described in the project brief. FlightPlan must work
+   identically with this module removed entirely; nothing here
+   touches app data outside the `cirrus` key. Panel open/collapsed
+   state is still NOT persisted — it's ephemeral UI, kept separate
+   from voice-session state, which now lives on the conversation
+   object (`voiceState`) rather than being hardcoded per call site.
    ============================================================ */
 
-export const CIRRUS_MODES = {
-  OFF: "off",
-  QUIET: "quiet",
-  COMPANION: "companion",
-};
+export { CIRRUS_MODES, WAVEFORM_STATES };
 
 const MODE_ORDER = [CIRRUS_MODES.OFF, CIRRUS_MODES.QUIET, CIRRUS_MODES.COMPANION];
 const MODE_LABEL = {
   [CIRRUS_MODES.OFF]: "Off",
   [CIRRUS_MODES.QUIET]: "Quiet",
   [CIRRUS_MODES.COMPANION]: "Companion",
-};
-
-export const WAVEFORM_STATES = {
-  READY: "ready",
-  LISTENING: "listening",
-  THINKING: "thinking",
-  SPEAKING: "speaking",
-  APPROVAL: "approval",
-  PAUSED: "paused",
 };
 
 /* ---------- persisted state ---------- */
@@ -87,10 +77,12 @@ export function Waveform({ state = WAVEFORM_STATES.READY, size = 20 }) {
    `open`/`setOpen` are owned by the caller (CollegeHub) so the
    keyboard shortcut and the Home strip can reach the same state.
    ============================================================ */
-export function CirrusDock({ data, update, open, setOpen }) {
+export function CirrusDock({ data, update, open, setOpen, page, selectedObject }) {
   const mode = data?.cirrus?.mode || CIRRUS_MODES.OFF;
   const [collapsed, setCollapsed] = useState(false);
+  const [draft, setDraft] = useState("");
   const panelRef = useRef(null);
+  const conversation = useCirrusConversation({ mode, page, selectedObject });
 
   useEffect(() => {
     if (!open) setCollapsed(false);
@@ -108,7 +100,14 @@ export function CirrusDock({ data, update, open, setOpen }) {
   const setMode = (m) =>
     update((d) => ({ ...d, cirrus: { ...(d.cirrus || blankCirrus()), mode: m } }));
 
-  const statusLabel = mode === CIRRUS_MODES.OFF ? "off" : "ready";
+  const sendDraft = (e) => {
+    e.preventDefault();
+    if (!draft.trim()) return;
+    conversation.addMessage("user", draft);
+    setDraft("");
+  };
+
+  const statusLabel = mode === CIRRUS_MODES.OFF ? "off" : conversation.voiceState;
 
   return (
     <>
@@ -125,7 +124,7 @@ export function CirrusDock({ data, update, open, setOpen }) {
         {mode === CIRRUS_MODES.OFF ? (
           <span className="cirrus-dot" aria-hidden="true" />
         ) : (
-          <Waveform state={WAVEFORM_STATES.READY} size={14} />
+          <Waveform state={conversation.voiceState} size={14} />
         )}
       </button>
 
@@ -139,7 +138,7 @@ export function CirrusDock({ data, update, open, setOpen }) {
             aria-label="Cirrus"
           >
             <div className="cirrus-panel-head">
-              <Waveform state={WAVEFORM_STATES.READY} size={18} />
+              <Waveform state={conversation.voiceState} size={18} />
               <div className="cirrus-head-text">
                 <span className="cirrus-title">Cirrus</span>
                 <span className="cirrus-status">
@@ -191,9 +190,18 @@ export function CirrusDock({ data, update, open, setOpen }) {
                   <>
                     <div className="cirrus-chat-log">
                       <p className="cirrus-note">
-                        Not connected to a reasoning provider yet — this is the interface
-                        shell for {MODE_LABEL[mode].toLowerCase()} mode.
+                        Not connected to a reasoning provider yet — messages you send stay on
+                        this device for this session only, and Cirrus won't reply.
                       </p>
+                      {conversation.messages.length > 0 && (
+                        <div className="cirrus-log-list">
+                          {conversation.messages.map((m) => (
+                            <p key={m.id} className={`cirrus-log-msg ${m.role}`}>
+                              {m.content}
+                            </p>
+                          ))}
+                        </div>
+                      )}
                     </div>
 
                     <div className="cirrus-suggestions" aria-label="Suggestions">
@@ -204,12 +212,18 @@ export function CirrusDock({ data, update, open, setOpen }) {
                       ))}
                     </div>
 
-                    <div className="cirrus-chat-input">
-                      <input type="text" placeholder="Talk to Cirrus…" disabled aria-label="Message Cirrus" />
-                      <button type="button" className="btn" disabled>
+                    <form className="cirrus-chat-input" onSubmit={sendDraft}>
+                      <input
+                        type="text"
+                        placeholder="Talk to Cirrus…"
+                        aria-label="Message Cirrus"
+                        value={draft}
+                        onChange={(e) => setDraft(e.target.value)}
+                      />
+                      <button type="submit" className="btn" disabled={!draft.trim()}>
                         Send
                       </button>
-                    </div>
+                    </form>
 
                     {mode === CIRRUS_MODES.COMPANION && (
                       <p className="cirrus-note dim">
@@ -338,7 +352,15 @@ export const CIRRUS_CSS = `
   .cirrus-note { font-size: 12px; color: var(--faint); line-height: 1.5; margin: 0; }
   .cirrus-note.dim { opacity: .8; }
 
-  .cirrus-chat-log { flex: 1; min-height: 0; }
+  .cirrus-chat-log { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; }
+  .cirrus-log-list { display: flex; flex-direction: column; gap: 6px; }
+  .cirrus-log-msg {
+    margin: 0; align-self: flex-end; max-width: 88%;
+    background: rgba(62,142,99,.14); color: var(--bone);
+    font-size: 13px; line-height: 1.4;
+    padding: 8px 11px; border-radius: 12px 12px 2px 12px;
+    white-space: pre-wrap; word-break: break-word;
+  }
 
   .cirrus-suggestions { display: flex; flex-wrap: wrap; gap: 6px; flex: none; }
   .cirrus-chip {
