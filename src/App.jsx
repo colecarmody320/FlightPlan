@@ -118,6 +118,8 @@ function migrate(d) {
       frontImg: "",
       backImg: "",
       ...c,
+      // existing cards carry a box but no interval — derive one from it
+      ivl: c.ivl ?? (c.seen ? BOX_GAP[c.box] ?? 1 : 0),
     })),
     sessions: d.sessions || [],
     goals: (d.goals || []).map((g) => ({
@@ -339,6 +341,37 @@ function studyPriority(course, data) {
 }
 
 const BOX_GAP = { 1: 1, 2: 2, 3: 4, 4: 8, 5: 16 };
+
+/* Four-button scheduling. `box` is kept in step so every existing view — box
+   spread, "weakest box" sorting, the readiness score — keeps working, while
+   `ivl` carries the finer interval the buttons need. */
+const FIRST_IVL = { again: 0, hard: 1, good: 4, easy: 9 };
+const GROW = { hard: 1.2, good: 2.5, easy: 4 };
+
+function nextIvl(card, rating) {
+  if (rating === "again") return 0;
+  const prev = Number(card.ivl) || 0;
+  if (prev <= 0) return FIRST_IVL[rating];
+  return Math.min(365, Math.max(1, Math.round(prev * GROW[rating])));
+}
+
+function nextBox(box, rating) {
+  const b = Number(box) || 1;
+  if (rating === "again") return 1;
+  if (rating === "hard") return Math.max(1, b);
+  if (rating === "good") return Math.min(5, b + 1);
+  return Math.min(5, b + 2);
+}
+
+const ivlLabel = (d) =>
+  d === 0 ? "5m" : d === 1 ? "1d" : d < 30 ? `${d}d` : d < 365 ? `${Math.round(d / 30)}mo` : "1y";
+
+const RATINGS = [
+  { key: "again", label: "Again", digit: "1" },
+  { key: "hard", label: "Hard", digit: "2" },
+  { key: "good", label: "Good", digit: "3" },
+  { key: "easy", label: "Easy", digit: "4" },
+];
 
 /* ---------- goal math ---------- */
 function goalProgress(goal, data) {
@@ -1707,7 +1740,7 @@ function Browse({ data, update, start }) {
 
   const resetBox = (id) =>
     update((d) => {
-      d.cards = d.cards.map((c) => (c.id === id ? { ...c, box: 1, due: todayISO() } : c));
+      d.cards = d.cards.map((c) => (c.id === id ? { ...c, box: 1, ivl: 0, due: todayISO() } : c));
       return d;
     });
 
@@ -1872,6 +1905,7 @@ function AddCards({ data, update }) {
         frontImg,
         backImg,
         box: 1,
+        ivl: 0,
         due: todayISO(),
         lastReviewed: null,
         seen: 0,
@@ -1900,6 +1934,7 @@ function AddCards({ data, update }) {
           frontImg: "",
           backImg: "",
           box: 1,
+          ivl: 0,
           due: todayISO(),
           lastReviewed: null,
           seen: 0,
@@ -1978,6 +2013,7 @@ function AddCards({ data, update }) {
 
 function Review({ data, update, scope, done }) {
   const today = todayISO();
+
   const queue = useMemo(() => {
     const byId = Object.fromEntries(data.cards.map((c) => [c.id, c]));
     const arr = scope.ids.map((id) => byId[id]).filter(Boolean);
@@ -1988,103 +2024,334 @@ function Review({ data, update, scope, done }) {
     return arr;
   }, []);
 
-  const [round, setRound] = useState(queue);
+  // the round is a list of card ids so a lapsed card can be re-inserted
+  const [order, setOrder] = useState(() => queue.map((c) => c.id));
   const [i, setI] = useState(0);
   const [revealed, setRevealed] = useState(false);
-  const [right, setRight] = useState(0);
-  const [missedIds, setMissedIds] = useState([]);
-  const [anim, setAnim] = useState("taxi");
-  const card = round[i];
+  const [exit, setExit] = useState(null);
+  const [tally, setTally] = useState({ again: 0, hard: 0, good: 0, easy: 0 });
+  const [lapsed, setLapsed] = useState([]);
+  const [editing, setEditing] = useState(false);
+  const [drag, setDrag] = useState(null);
 
-  const grade = (correct) => {
-    if (anim !== "taxi") return;
-    setAnim(correct ? "takeoff" : "divert");
+  const byId = Object.fromEntries(data.cards.map((c) => [c.id, c]));
+  const card = byId[order[i]];
+  const reduced =
+    typeof window !== "undefined" &&
+    window.matchMedia &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* ---------- grading ---------- */
+  const commit = (rating) => {
+    if (!card || exit) return;
+
+    const ivl = nextIvl(card, rating);
+    const box = nextBox(card.box, rating);
+    const id = card.id;
 
     update((d) => {
-      d.cards = d.cards.map((c) => {
-        if (c.id !== card.id) return c;
-        const box = correct ? Math.min(5, c.box + 1) : 1;
-        return {
-          ...c,
-          box,
-          due: addDays(today, BOX_GAP[box]),
-          lastReviewed: today,
-          seen: (c.seen || 0) + 1,
-          missed: (c.missed || 0) + (correct ? 0 : 1),
-        };
-      });
+      d.cards = d.cards.map((c) =>
+        c.id !== id
+          ? c
+          : {
+              ...c,
+              box,
+              ivl,
+              due: addDays(today, Math.max(ivl, rating === "again" ? 0 : 1)),
+              lastReviewed: today,
+              seen: (c.seen || 0) + 1,
+              missed: (c.missed || 0) + (rating === "again" ? 1 : 0),
+            }
+      );
       return d;
     });
 
+    setExit(rating);
+    setTally((t) => ({ ...t, [rating]: t[rating] + 1 }));
+
+    setTimeout(
+      () => {
+        if (rating === "again") {
+          // comes back later in this same session, the way "5m" implies
+          setLapsed((l) => (l.includes(id) ? l : [...l, id]));
+          setOrder((o) => {
+            const rest = o.slice(i + 1);
+            const at = Math.min(rest.length, 4);
+            return [...o.slice(0, i + 1), ...rest.slice(0, at), id, ...rest.slice(at)];
+          });
+        }
+        setRevealed(false);
+        setEditing(false);
+        setExit(null);
+        setDrag(null);
+        setI((x) => x + 1);
+      },
+      reduced ? 0 : 300
+    );
+  };
+
+  const skip = () => {
+    if (!card || exit) return;
     const id = card.id;
-    setTimeout(() => {
-      if (correct) setRight((r) => r + 1);
-      else setMissedIds((m) => [...m, id]);
-      setRevealed(false);
-      setI((x) => x + 1);
-      setAnim("taxi");
-    }, 460);
-  };
-
-  const retryMissed = () => {
-    const byId = Object.fromEntries(data.cards.map((c) => [c.id, c]));
-    setRound(missedIds.map((id) => byId[id]).filter(Boolean));
-    setMissedIds([]);
-    setRight(0);
-    setI(0);
+    setOrder((o) => [...o.slice(0, i), ...o.slice(i + 1), id]);
     setRevealed(false);
-    setAnim("taxi");
+    setEditing(false);
   };
 
-  if (!card)
+  /* ---------- keyboard ---------- */
+  useEffect(() => {
+    const onKey = (e) => {
+      const tag = (e.target.tagName || "").toLowerCase();
+      if (tag === "input" || tag === "textarea" || tag === "select") return;
+      if (!card) return;
+
+      if (e.code === "Space") {
+        e.preventDefault();
+        if (!revealed) setRevealed(true);
+        return;
+      }
+      const k = e.key.toLowerCase();
+      if (k === "e") {
+        e.preventDefault();
+        setEditing((v) => !v);
+        return;
+      }
+      if (k === "s") {
+        e.preventDefault();
+        skip();
+        return;
+      }
+      const hit = RATINGS.find((r) => r.digit === e.key);
+      if (hit) {
+        e.preventDefault();
+        if (revealed) commit(hit.key); // no rating before the answer is seen
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [card, revealed, exit, i]);
+
+  /* ---------- pointer / swipe ---------- */
+  const startDrag = (e) => {
+    if (!revealed || exit) return;
+    setDrag({ x0: e.clientX, y0: e.clientY, dx: 0, dy: 0 });
+  };
+  const moveDrag = (e) => {
+    if (!drag) return;
+    setDrag((d) => ({ ...d, dx: e.clientX - d.x0, dy: e.clientY - d.y0 }));
+  };
+  const endDrag = () => {
+    if (!drag) return;
+    const { dx, dy } = drag;
+    // horizontal-dominant so vertical page scrolling still belongs to the page
+    if (Math.abs(dx) >= 45) {
+      if (dx < 0) commit(dy > 40 ? "hard" : "again");
+      else commit(dy < -40 ? "easy" : "good");
+    }
+    setDrag(null);
+  };
+
+  /* ---------- completion ---------- */
+  if (!card) {
+    const total = tally.again + tally.hard + tally.good + tally.easy;
     return (
       <Section title="Round complete">
-        <p>
-          {right} of {round.length} correct.
+        <p style={{ fontSize: 18 }}>
+          {total} card{total === 1 ? "" : "s"} reviewed
         </p>
-        {missedIds.length > 0 && (
-          <button style={S.btn} className="btn" onClick={retryMissed}>
-            Retry the {missedIds.length} you missed
+        <p style={S.dim}>
+          {tally.again} again · {tally.hard} hard · {tally.good} good · {tally.easy} easy
+        </p>
+        {lapsed.length > 0 && (
+          <button
+            style={S.btn}
+            className="btn"
+            onClick={() => {
+              setOrder(lapsed);
+              setLapsed([]);
+              setI(0);
+              setRevealed(false);
+              setTally({ again: 0, hard: 0, good: 0, easy: 0 });
+            }}
+          >
+            Run the {lapsed.length} you missed again
           </button>
         )}
-        <button style={S.btn} className="btn" onClick={done}>Back to decks</button>
+        <button style={S.btn} className="btn" onClick={done}>
+          Back to decks
+        </button>
       </Section>
     );
+  }
 
   const code = data.courses.find((c) => c.id === card.courseId)?.code || "";
+  // a blank line in the back splits answer from explanation
+  const [answer, ...restParts] = (card.back || "").split(/\n\s*\n/);
+  const explanation = restParts.join("\n\n").trim();
+
+  const behind = Math.min(3, Math.max(0, order.length - i - 1));
+  const dragStyle =
+    drag && !exit
+      ? {
+          transform: `translate(${drag.dx}px, ${drag.dy * 0.35}px) rotate(${drag.dx * 0.03}deg)`,
+          transition: "none",
+        }
+      : undefined;
+
+  const hint =
+    drag && Math.abs(drag.dx) >= 45
+      ? drag.dx < 0
+        ? drag.dy > 40
+          ? "Hard"
+          : "Again"
+        : drag.dy < -40
+        ? "Easy"
+        : "Good"
+      : null;
 
   return (
-    <Section title={`${scope.label} — ${i + 1} of ${round.length}`}>
-      <p style={S.dim}>
-        {code}
-        {card.topic ? ` · ${card.topic}` : ""} · box {card.box}
-      </p>
-
-      <div className="fuel-row">
-        <Dial value={round.length - i} max={round.length} label="Cards remaining" size={54} />
-        <span style={S.dim}>
-          {round.length - i} of {round.length} remaining
+    <div className="rv">
+      <div className="rv-top">
+        <span className="rv-deck">{scope.label}</span>
+        <span className="rv-count">
+          {i + 1} / {order.length}
         </span>
       </div>
-
-      <div key={card.id} className={`plane ${anim}`} style={S.card}>
-        {card.front && <p style={{ fontSize: 18 }}>{card.front}</p>}
-        {card.frontImg && <img src={card.frontImg} alt="" style={S.cardImg} />}
-        {revealed ? (
-          <div className="flip">
-            <hr />
-            {card.back && <pre style={S.pre}>{card.back}</pre>}
-            {card.backImg && <img src={card.backImg} alt="" style={S.cardImg} />}
-            <button style={S.btn} className="btn" onClick={() => grade(false)}>Missed it</button>
-            <button style={S.btn} className="btn" onClick={() => grade(true)}>Got it</button>
-          </div>
-        ) : (
-          <button style={S.btn} className="btn" onClick={() => setRevealed(true)}>Show answer</button>
-        )}
+      <div className="rv-bar">
+        <span style={{ width: `${(i / Math.max(1, order.length)) * 100}%` }} />
       </div>
 
-      <button style={S.btn} className="btn" onClick={done}>Stop</button>
-    </Section>
+      <div className="rv-stage">
+        {Array.from({ length: behind }).map((_, n) => (
+          <div key={n} className={`rv-behind b${n + 1}`} aria-hidden="true" />
+        ))}
+
+        <div
+          className={`rv-card${revealed ? " flipped" : ""}${exit ? ` exit-${exit}` : ""}`}
+          style={dragStyle}
+          onPointerDown={startDrag}
+          onPointerMove={moveDrag}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
+          onClick={() => !revealed && !exit && setRevealed(true)}
+          onKeyDown={(e) => {
+            if ((e.key === "Enter" || e.key === " ") && !revealed) {
+              e.preventDefault();
+              setRevealed(true);
+            }
+          }}
+          role="button"
+          tabIndex={0}
+          aria-label={revealed ? "Answer shown" : "Question — activate to reveal the answer"}
+        >
+          <div className="rv-inner">
+            <div className="rv-face rv-front">
+              <p className="rv-tag">
+                {code}
+                {card.topic ? ` · ${card.topic}` : ""}
+              </p>
+              <div className="rv-body">
+                {card.front && <p className="rv-q">{card.front}</p>}
+                {card.frontImg && <img src={card.frontImg} alt="" className="rv-img" />}
+              </div>
+              <p className="rv-hint">Tap to reveal</p>
+            </div>
+
+            <div className="rv-face rv-back">
+              <p className="rv-tag">
+                {code}
+                {card.topic ? ` · ${card.topic}` : ""}
+              </p>
+              <div className="rv-body">
+                {answer && <p className="rv-a">{answer}</p>}
+                {card.backImg && <img src={card.backImg} alt="" className="rv-img" />}
+                {explanation && <p className="rv-exp">{explanation}</p>}
+              </div>
+              <p className="rv-hint">box {card.box}</p>
+            </div>
+          </div>
+
+          {hint && <span className="rv-swipe">{hint}</span>}
+        </div>
+      </div>
+
+      {revealed ? (
+        <div className="rv-rate">
+          {RATINGS.map((r) => (
+            <button key={r.key} className={`rv-btn ${r.key}`} onClick={() => commit(r.key)}>
+              <span className="rv-btn-l">{r.label}</span>
+              <span className="rv-btn-i">{ivlLabel(nextIvl(card, r.key))}</span>
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div className="rv-rate one">
+          <button className="rv-btn reveal" onClick={() => setRevealed(true)}>
+            <span className="rv-btn-l">Show answer</span>
+            <span className="rv-btn-i">space</span>
+          </button>
+        </div>
+      )}
+
+      <div className="rv-foot">
+        <button style={S.btn} className="btn" onClick={() => setEditing((v) => !v)}>
+          {editing ? "Close edit" : "Edit"}
+        </button>
+        <button style={S.btn} className="btn" onClick={skip}>
+          Skip
+        </button>
+        <button style={S.btn} className="btn" onClick={done}>
+          Stop
+        </button>
+        <span className="rv-keys">space flip · 1–4 rate · E edit · S skip</span>
+      </div>
+
+      {editing && (
+        <div className="rv-edit">
+          <label style={S.label}>Front</label>
+          <textarea
+            style={S.textarea}
+            rows={2}
+            value={card.front}
+            onChange={(e) =>
+              update((d) => {
+                d.cards = d.cards.map((c) =>
+                  c.id === card.id ? { ...c, front: e.target.value } : c
+                );
+                return d;
+              })
+            }
+          />
+          <label style={S.label}>Back — leave a blank line to add an explanation</label>
+          <textarea
+            style={S.textarea}
+            rows={4}
+            value={card.back}
+            onChange={(e) =>
+              update((d) => {
+                d.cards = d.cards.map((c) =>
+                  c.id === card.id ? { ...c, back: e.target.value } : c
+                );
+                return d;
+              })
+            }
+          />
+          <label style={S.label}>Topic</label>
+          <input
+            style={S.input}
+            value={card.topic || ""}
+            onChange={(e) =>
+              update((d) => {
+                d.cards = d.cards.map((c) =>
+                  c.id === card.id ? { ...c, topic: e.target.value } : c
+                );
+                return d;
+              })
+            }
+          />
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -3591,6 +3858,7 @@ function CourseNotes({ data, update, courseId }) {
           frontImg: "",
           backImg: "",
           box: 1,
+          ivl: 0,
           due: todayISO(),
           lastReviewed: null,
           seen: 0,
@@ -4196,12 +4464,207 @@ const CSS = `
   .hub code { font-family: 'JetBrains Mono', monospace; color: var(--green-bright); font-size: 12px; }
   .hub ol li::marker, .hub ul li::marker { color: var(--green); }
 
+  /* ============ review: a physical card on a table ============ */
+  .hub .rv { max-width: 620px; margin: 0 auto; overflow-x: hidden; }
+
+  .hub .rv-top {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 12px; margin-bottom: 8px;
+  }
+  .hub .rv-deck {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; letter-spacing: .18em; text-transform: uppercase;
+    color: var(--green-bright);
+  }
+  .hub .rv-count {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; color: var(--faint);
+  }
+  .hub .rv-bar {
+    height: 2px; background: var(--raised); border-radius: 999px;
+    overflow: hidden; margin-bottom: 26px;
+  }
+  .hub .rv-bar span {
+    display: block; height: 100%;
+    background: linear-gradient(90deg, var(--green-deep), var(--green-bright));
+    transition: width .3s ease;
+  }
+
+  /* stage carries the perspective so the flip has real depth */
+  .hub .rv-stage {
+    position: relative;
+    perspective: 1600px;
+    margin-bottom: 22px;
+    padding: 10px 0 18px;
+  }
+
+  /* the cards waiting underneath */
+  .hub .rv-behind {
+    position: absolute; inset: 10px 0 18px;
+    border-radius: 14px;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    box-shadow: 0 10px 24px rgba(0,0,0,.28);
+  }
+  .hub .rv-behind.b1 { transform: translateY(9px) scale(.978) rotate(-.5deg); opacity: .75; }
+  .hub .rv-behind.b2 { transform: translateY(17px) scale(.956) rotate(.7deg); opacity: .5; }
+  .hub .rv-behind.b3 { transform: translateY(24px) scale(.934) rotate(-.9deg); opacity: .28; }
+
+  .hub .rv-card {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 5 / 3;
+    min-height: 290px;
+    cursor: pointer;
+    transform-style: preserve-3d;
+    transition: transform .34s cubic-bezier(.22,.61,.36,1), opacity .28s ease;
+    touch-action: pan-y;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .hub .rv-card:focus-visible { outline: 2px solid var(--green-bright); outline-offset: 6px; border-radius: 16px; }
+
+  .hub .rv-inner {
+    position: relative; width: 100%; height: 100%;
+    transform-style: preserve-3d;
+    transition: transform .4s cubic-bezier(.4,.02,.2,1);
+  }
+  .hub .rv-card.flipped .rv-inner { transform: rotateY(180deg); }
+
+  .hub .rv-face {
+    position: absolute; inset: 0;
+    backface-visibility: hidden;
+    -webkit-backface-visibility: hidden;
+    display: flex; flex-direction: column;
+    border-radius: 14px;
+    border: 1px solid var(--edge);
+    background:
+      linear-gradient(168deg, rgba(255,255,255,.035), transparent 55%),
+      var(--surface);
+    box-shadow: 0 18px 42px rgba(0,0,0,.42), 0 2px 0 rgba(255,255,255,.03) inset;
+    padding: 26px 30px 22px;
+    overflow: hidden;
+  }
+  .hub .rv-back { transform: rotateY(180deg); }
+
+  .hub .rv-tag {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--faint); margin: 0; flex: none;
+  }
+  .hub .rv-body {
+    flex: 1; min-height: 0; overflow-y: auto;
+    display: flex; flex-direction: column; justify-content: center;
+    gap: 12px; padding: 14px 0;
+  }
+  .hub .rv-q {
+    font-size: clamp(19px, 3.1vw, 26px);
+    line-height: 1.35; font-weight: 600; letter-spacing: -.01em;
+    color: var(--bone); margin: 0; text-align: center;
+  }
+  .hub .rv-a {
+    font-size: clamp(17px, 2.7vw, 22px);
+    line-height: 1.45; color: var(--bone); margin: 0; text-align: center;
+    white-space: pre-wrap;
+  }
+  .hub .rv-exp {
+    font-size: 13px; line-height: 1.6; color: var(--muted);
+    margin: 0; text-align: center; white-space: pre-wrap;
+    border-top: 1px solid var(--line); padding-top: 12px;
+  }
+  .hub .rv-img { max-width: 100%; max-height: 190px; object-fit: contain; margin: 0 auto; border-radius: 8px; }
+  .hub .rv-hint {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--faint); margin: 0; text-align: center; flex: none;
+  }
+
+  .hub .rv-swipe {
+    position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--green-bright);
+    border: 1px solid var(--green); border-radius: 999px;
+    padding: 4px 12px; background: var(--ground);
+    pointer-events: none;
+  }
+
+  /* exits — each rating leaves in its own direction */
+  .hub .rv-card.exit-again { animation: exAgain .3s cubic-bezier(.4,0,.7,.2) forwards; }
+  .hub .rv-card.exit-hard  { animation: exHard  .3s cubic-bezier(.4,0,.7,.2) forwards; }
+  .hub .rv-card.exit-good  { animation: exGood  .3s cubic-bezier(.4,0,.7,.2) forwards; }
+  .hub .rv-card.exit-easy  { animation: exEasy  .3s cubic-bezier(.4,0,.7,.2) forwards; }
+
+  @keyframes exAgain { to { opacity: 0; transform: translate(-460px, 10px) rotate(-16deg); } }
+  @keyframes exHard  { to { opacity: 0; transform: translate(-330px, 190px) rotate(-11deg); } }
+  @keyframes exGood  { to { opacity: 0; transform: translate(460px, 10px) rotate(16deg); } }
+  @keyframes exEasy  { to { opacity: 0; transform: translate(330px, -210px) rotate(11deg); } }
+
+  /* rating row */
+  .hub .rv-rate { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .hub .rv-rate.one { grid-template-columns: 1fr; }
+  .hub .rv-btn {
+    display: flex; flex-direction: column; align-items: center; gap: 3px;
+    padding: 11px 8px;
+    border-radius: 12px;
+    border: 1px solid var(--edge);
+    background: transparent;
+    color: var(--bone);
+    cursor: pointer;
+    font-family: inherit;
+    transition: border-color .15s ease, background .15s ease, color .15s ease;
+  }
+  .hub .rv-btn:hover { background: rgba(62,142,99,.1); }
+  .hub .rv-btn-l { font-size: 14px; font-weight: 600; }
+  .hub .rv-btn-i {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; color: var(--faint); letter-spacing: .08em;
+  }
+  .hub .rv-btn.again:hover { border-color: #C4705A; color: #C4705A; }
+  .hub .rv-btn.hard:hover  { border-color: #D98F5A; color: #D98F5A; }
+  .hub .rv-btn.good:hover  { border-color: var(--green); color: var(--green-bright); }
+  .hub .rv-btn.easy:hover  { border-color: var(--green-bright); color: var(--green-bright); }
+  .hub .rv-btn.reveal {
+    border: none;
+    background: linear-gradient(135deg, var(--green), var(--green-deep));
+    color: #0D1411;
+    box-shadow: 0 6px 20px rgba(62,142,99,.28);
+  }
+  .hub .rv-btn.reveal .rv-btn-i { color: rgba(13,20,17,.6); }
+
+  .hub .rv-foot {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 4px;
+    margin-top: 18px;
+  }
+  .hub .rv-keys {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; letter-spacing: .1em; color: var(--faint);
+    margin-left: auto;
+  }
+  .hub .rv-edit {
+    margin-top: 14px; padding-top: 14px;
+    border-top: 1px solid var(--line);
+  }
+
+  @media (max-width: 560px) {
+    .hub .rv-card { aspect-ratio: 4 / 3; min-height: 260px; }
+    .hub .rv-face { padding: 20px 20px 16px; border-radius: 12px; }
+    .hub .rv-rate { gap: 6px; }
+    .hub .rv-btn { padding: 10px 4px; border-radius: 10px; }
+    .hub .rv-btn-l { font-size: 13px; }
+    .hub .rv-keys { display: none; }
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .hub .hero, .hub .hero-2, .hub .hero-3, .hub .view, .hub .panel,
     .hub .flip, .hub .plane, .hub .prop-blades, .hub .prop-disc, .hub .horizon,
     .hub .walk .panel::before, .hub .sock polygon,
     .hub .nav-red, .hub .nav-green, .hub .caret, .hub .rwy-center { animation: none; }
     .hub .dial-needle, .hub .drum-col, .hub .gauge span, .hub .tile, .hub .sock { transition: none; }
+    .hub .rv-inner { transition: none; }
+    .hub .rv-card { transition: none; }
+    .hub .rv-card.exit-again, .hub .rv-card.exit-hard,
+    .hub .rv-card.exit-good, .hub .rv-card.exit-easy { animation: none; opacity: 0; }
+    .hub .rv-bar span { transition: none; }
   }
 
   @media (max-width: 940px) {
