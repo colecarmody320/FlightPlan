@@ -3,23 +3,9 @@ import { supabase } from "./supabase.js";
 const ALLOWED_EMAIL = "nicholasmcarmody@gmail.com";
 
 /* ============================================================
-   FLIGHTPLAN v1.0
+   FLIGHTPLAN v1.1
    Study tool + grade tracker + goals + personal accountability.
-   Aviation-weighted. No design pass.
-
-   Storage key "hub:v1" — earlier versions migrate forward.
-   {
-     courses:  [...], notes: [...], cards: [...], sessions: [...],
-     goals:    [{ id, title, domain:"academic"|"personal", courseId,
-                  type:"count"|"checklist"|"hours"|"miles"|"gymdays",
-                  target, unit, deadline, start, steps:[...], log:[...], done }],
-     personal: {
-       gymTarget: 4,     // gym days per week
-       milesTarget: 10,  // miles per week
-       workouts: [{ id, date, type, minutes, miles, notes }],
-       lifts:    [{ id, name, entries:[{id,date,weight,reps}] }]
-     }
-   }
+   Aviation-weighted, aviation-instrumented.
    ============================================================ */
 
 const KEY = "hub:v1";
@@ -141,12 +127,10 @@ function migrate(d) {
       ...(d.personal || {}),
       workouts: (d.personal?.workouts || []).map((w) => ({ miles: 0, ...w })),
     },
-    // tasks intentionally dropped — Work tab removed
   };
 }
 
 /* ---------- images on cards ---------- */
-// Downscale before storing — full-size photos would blow past the storage cap fast.
 function shrinkImage(file, maxDim = 900, quality = 0.65) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -422,7 +406,6 @@ function weekBuckets(workouts, weeks = 8) {
   });
 }
 
-// consecutive weeks (ending with last completed week) that met the target
 function weeklyStreak(workouts, target) {
   let streak = 0;
   for (let back = 0; back < 52; back++) {
@@ -430,13 +413,12 @@ function weeklyStreak(workouts, target) {
     const to = addDays(from, 6);
     const count = workouts.filter((w) => w.date >= from && w.date <= to).length;
     if (count >= target) streak++;
-    else if (back === 0) continue; // current week still in progress
+    else if (back === 0) continue;
     else break;
   }
   return streak;
 }
 
-// consecutive weeks hitting the weekly mileage target
 function milesStreak(workouts, target) {
   if (!target) return 0;
   let streak = 0;
@@ -445,13 +427,12 @@ function milesStreak(workouts, target) {
     const to = addDays(from, 6);
     const total = sumMiles(workouts.filter((w) => w.date >= from && w.date <= to));
     if (total >= target) streak++;
-    else if (back === 0) continue; // current week still in progress
+    else if (back === 0) continue;
     else break;
   }
   return streak;
 }
 
-// every week from the first logged workout through the current one
 function allWeekBuckets(workouts) {
   if (!workouts.length) return [];
   const first = [...workouts].map((w) => w.date).sort()[0];
@@ -467,7 +448,6 @@ const monthLabel = (key) => {
   return `${MONTH_NAME[Number(m) - 1]} ${y}`;
 };
 
-// month-by-month rollup, with how many of that month's weeks hit each target
 function monthBuckets(workouts, gymTarget, milesTarget) {
   if (!workouts.length) return [];
   const weeks = allWeekBuckets(workouts);
@@ -510,7 +490,6 @@ const reviewedOn = (data, day) => Number(data.reviewLog?.[day] || 0);
 const reviewedToday = (data) => reviewedOn(data, todayISO());
 const dailyCardTarget = (data) => Number(data.settings?.cardsPerDay || 0);
 
-// consecutive days the daily card quota was met
 function cardStreak(data) {
   const target = dailyCardTarget(data);
   if (!target) return 0;
@@ -527,10 +506,9 @@ function cardStreak(data) {
   return streak;
 }
 
-// today's queue: everything due first, then the closest-to-due cards to top up
 function dailyQueue(data, count) {
   const today = todayISO();
-  const pool = data.cards.filter((c) => !c.archivedCard);
+  const pool = data.cards;
   const due = pool
     .filter((c) => !c.due || c.due <= today)
     .sort((a, b) => (a.due || "").localeCompare(b.due || ""));
@@ -540,7 +518,6 @@ function dailyQueue(data, count) {
   return [...due, ...upcoming].slice(0, Math.max(0, count));
 }
 
-// consecutive days ending today (or yesterday, if today's session isn't in yet)
 function studyStreak(sessions) {
   if (!sessions.length) return 0;
   const days = new Set(sessions.map((s) => s.date));
@@ -558,7 +535,6 @@ function studyStreak(sessions) {
   return streak;
 }
 
-// straight percentage average across the aviation courses
 function aviationAverage(data) {
   const marks = live(data)
     .filter((c) => c.tier === "core")
@@ -570,6 +546,267 @@ function aviationAverage(data) {
 function daysSinceLastWorkout(workouts) {
   const last = [...workouts].map((w) => w.date).sort().pop();
   return last ? daysBetween(last, todayISO()) : null;
+}
+
+/* ============================================================
+   AVIATION INSTRUMENTS
+   ============================================================ */
+
+/* ---------- cabin lighting: the palette walks through the day ---------- */
+function cabinPhase(d = new Date()) {
+  const h = d.getHours();
+  if (h >= 5 && h < 11) return "dawn";
+  if (h >= 11 && h < 17) return "day";
+  if (h >= 21 || h < 5) return "night";
+  return "dusk";
+}
+
+const CABIN = {
+  dawn:  { lamp: "#E8B36A", ground: "#11150F", g1: "rgba(232,179,106,.22)", g2: "rgba(201,148,92,.13)" },
+  day:   { lamp: "#7FB2D4", ground: "#0D1411", g1: "rgba(127,178,212,.20)", g2: "rgba(62,142,99,.17)"  },
+  dusk:  { lamp: "#C98A5C", ground: "#0A0F0C", g1: "rgba(201,138,92,.17)",  g2: "rgba(52,72,98,.18)"   },
+  night: { lamp: "#C4483A", ground: "#070A08", g1: "rgba(196,72,58,.13)",   g2: "rgba(31,81,56,.11)"   },
+};
+
+function useCabin() {
+  const [phase, setPhase] = useState(cabinPhase());
+  useEffect(() => {
+    const t = setInterval(() => setPhase(cabinPhase()), 60000);
+    return () => clearInterval(t);
+  }, []);
+  const c = CABIN[phase];
+  return {
+    phase,
+    vars: {
+      "--lamp": c.lamp,
+      "--ground": c.ground,
+      "--glow1": c.g1,
+      "--glow2": c.g2,
+      background: c.ground,
+    },
+  };
+}
+
+/* ---------- round instrument dial ---------- */
+function arcPath(cx, cy, r, a0, a1) {
+  const pt = (a) => [
+    cx + r * Math.sin((a * Math.PI) / 180),
+    cy - r * Math.cos((a * Math.PI) / 180),
+  ];
+  const [x0, y0] = pt(a0);
+  const [x1, y1] = pt(a1);
+  const large = Math.abs(a1 - a0) > 180 ? 1 : 0;
+  return `M ${x0} ${y0} A ${r} ${r} 0 ${large} 1 ${x1} ${y1}`;
+}
+
+function Dial({ value, max, label, size = 78 }) {
+  const ratio = max > 0 ? Math.min(1.12, Number(value) / Number(max)) : 0;
+  const [swept, setSwept] = useState(0);
+
+  useEffect(() => {
+    const t = setTimeout(() => setSwept(ratio), 140);
+    return () => clearTimeout(t);
+  }, [ratio]);
+
+  const SWEEP = 250;
+  const START = -SWEEP / 2;
+  const angle = START + swept * SWEEP;
+  const met = ratio >= 1;
+  const ticks = Array.from({ length: 11 }, (_, i) => START + (i / 10) * SWEEP);
+  const rad = (a) => (a * Math.PI) / 180;
+
+  return (
+    <svg
+      className={met ? "dial met" : "dial"}
+      viewBox="0 0 100 100"
+      width={size}
+      height={size}
+      role="img"
+      aria-label={`${label}: ${value} of ${max}`}
+    >
+      <circle cx="50" cy="50" r="45" className="dial-face" />
+      <circle cx="50" cy="50" r="45" className="dial-bezel" />
+      <path d={arcPath(50, 50, 37, START, START + SWEEP)} className="dial-track" />
+      <path d={arcPath(50, 50, 37, START, START + SWEEP * Math.min(1, swept))} className="dial-arc" />
+      {ticks.map((a, i) => {
+        const long = i % 5 === 0;
+        return (
+          <line
+            key={i}
+            x1={50 + 41 * Math.sin(rad(a))}
+            y1={50 - 41 * Math.cos(rad(a))}
+            x2={50 + (long ? 31 : 35) * Math.sin(rad(a))}
+            y2={50 - (long ? 31 : 35) * Math.cos(rad(a))}
+            className={long ? "dial-tick major" : "dial-tick"}
+          />
+        );
+      })}
+      <g className="dial-needle" style={{ transform: `rotate(${angle}deg)` }}>
+        <polygon points="50,13 47.2,53 52.8,53" />
+      </g>
+      <circle cx="50" cy="50" r="4.4" className="dial-hub" />
+    </svg>
+  );
+}
+
+/* ---------- altimeter drum ---------- */
+function Drum({ value, decimals = 0, suffix = "" }) {
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setReady(true), 90);
+    return () => clearTimeout(t);
+  }, []);
+
+  const n = Number(value);
+  if (value === null || value === undefined || value === "—" || !Number.isFinite(n))
+    return <span>—</span>;
+
+  const text = n.toFixed(decimals) + suffix;
+  const digits = "0123456789".split("");
+
+  return (
+    <span className="drum">
+      {text.split("").map((ch, i) =>
+        /[0-9]/.test(ch) ? (
+          <span className="drum-win" key={i}>
+            <span
+              className="drum-col"
+              style={{
+                transform: `translateY(-${(ready ? Number(ch) : 0) * 10}%)`,
+                transitionDelay: `${i * 55}ms`,
+              }}
+            >
+              {digits.map((d) => (
+                <span key={d}>{d}</span>
+              ))}
+            </span>
+          </span>
+        ) : (
+          <span key={i} className="drum-fixed">{ch}</span>
+        )
+      )}
+    </span>
+  );
+}
+
+/* ---------- ATIS ticker ---------- */
+function Atis({ text }) {
+  const [n, setN] = useState(0);
+  useEffect(() => {
+    setN(0);
+    const t = setInterval(() => {
+      setN((x) => {
+        if (x >= text.length) {
+          clearInterval(t);
+          return x;
+        }
+        return x + 1;
+      });
+    }, 13);
+    return () => clearInterval(t);
+  }, [text]);
+
+  return (
+    <span>
+      {text.slice(0, n)}
+      {n < text.length && <span className="caret" />}
+    </span>
+  );
+}
+
+/* ---------- windsock: whole-system pace at a glance ---------- */
+function paceStrength(data) {
+  const ws = weekStart();
+  const dayIdx = ((new Date().getDay() + 6) % 7) + 1;
+  const prorate = dayIdx / 7;
+
+  const week = (data.personal?.workouts || []).filter((w) => w.date >= ws);
+  const gymT = Number(data.personal?.gymTarget || 0) * prorate;
+  const miT = Number(data.personal?.milesTarget || 0) * prorate;
+  const studyT = live(data).reduce((s, c) => s + Number(c.weeklyMinutes || 0), 0) * prorate;
+  const studyMin = data.sessions
+    .filter((s) => s.date >= ws)
+    .reduce((s, x) => s + Number(x.minutes), 0);
+
+  const parts = [
+    gymT > 0 ? gymDays(week) / gymT : null,
+    miT > 0 ? sumMiles(week) / miT : null,
+    studyT > 0 ? studyMin / studyT : null,
+  ].filter((x) => x !== null);
+
+  if (!parts.length) return 0;
+  const avg = parts.reduce((a, b) => a + b, 0) / parts.length;
+  return Math.max(0, Math.min(1, avg));
+}
+
+function Windsock({ data }) {
+  const strength = paceStrength(data);
+  const angle = 74 - strength * 74;
+  const flap = 2.6 - strength * 1.5;
+  const label =
+    strength >= 0.95
+      ? "Full sock — every target on pace"
+      : strength >= 0.6
+      ? "Steady — mostly on pace"
+      : strength >= 0.3
+      ? "Light and variable — slipping"
+      : "Calm — well behind pace";
+
+  return (
+    <div className="sock-wrap" title={label} aria-label={label}>
+      <svg viewBox="0 0 80 80" width="72" height="72">
+        <line x1="16" y1="70" x2="16" y2="18" className="sock-pole" />
+        <circle cx="16" cy="18" r="2.4" className="sock-ring" />
+        <g className="sock" style={{ transform: `rotate(${angle}deg)`, animationDuration: `${flap}s` }}>
+          <polygon points="16,12 16,24 38,22.5 38,13.5" className="s1" />
+          <polygon points="38,13.5 38,22.5 54,21.4 54,14.6" className="s2" />
+          <polygon points="54,14.6 54,21.4 66,20.6 66,15.4" className="s3" />
+        </g>
+      </svg>
+      <span className="sock-cap">WIND</span>
+    </div>
+  );
+}
+
+/* ---------- aircraft mark with nav lights ---------- */
+function Mark() {
+  return (
+    <span className="mark">
+      <svg viewBox="0 0 24 24" width="19" height="19">
+        <path
+          className="mark-body"
+          d="M12 1.6 L13.3 9.6 L22 13.9 L22 15.9 L13.3 13.4 L12.9 19.3 L15.8 21 L15.8 22.2 L12 21.2 L8.2 22.2 L8.2 21 L11.1 19.3 L10.7 13.4 L2 15.9 L2 13.9 L10.7 9.6 Z"
+        />
+        <circle cx="2.6" cy="15.1" r="1.15" className="nav-red" />
+        <circle cx="21.4" cy="15.1" r="1.15" className="nav-green" />
+      </svg>
+    </span>
+  );
+}
+
+/* ---------- compass rose watermark ---------- */
+function Rose() {
+  return (
+    <svg className="rose" viewBox="0 0 200 200" aria-hidden="true">
+      <circle cx="100" cy="100" r="92" />
+      <circle cx="100" cy="100" r="72" />
+      {Array.from({ length: 36 }, (_, i) => {
+        const a = (i * 10 * Math.PI) / 180;
+        const long = i % 9 === 0;
+        return (
+          <line
+            key={i}
+            x1={100 + 92 * Math.sin(a)}
+            y1={100 - 92 * Math.cos(a)}
+            x2={100 + (long ? 74 : 84) * Math.sin(a)}
+            y2={100 - (long ? 74 : 84) * Math.cos(a)}
+            className={long ? "rose-major" : ""}
+          />
+        );
+      })}
+      <polygon points="100,16 106,50 100,44 94,50" className="rose-n" />
+    </svg>
+  );
 }
 
 /* ---------- the greeting ---------- */
@@ -649,7 +886,6 @@ const BAND_TITLE = {
   night: "Still up",
 };
 
-// a status line in the shape of a METAR — real numbers, familiar format
 function statusStrip(data) {
   const now = new Date();
   const stamp = `${String(now.getDate()).padStart(2, "0")}${String(now.getHours()).padStart(
@@ -679,41 +915,29 @@ function Greeting({ data, go }) {
     return pool[Math.floor(Math.random() * pool.length)];
   }, [band]);
 
+  // typed once per mount so it doesn't retype on every keystroke elsewhere
+  const strip = useMemo(() => statusStrip(data), []);
+
   const graded = live(data).map((c) => courseGrade(c).current).filter((x) => x !== null);
   const gpa = graded.length
-    ? (graded.reduce((s, p) => s + GPA_PTS[letterFor(p)], 0) / graded.length).toFixed(2)
-    : "—";
+    ? graded.reduce((s, p) => s + GPA_PTS[letterFor(p)], 0) / graded.length
+    : null;
   const due = data.cards.filter((c) => !c.due || c.due <= todayISO()).length;
+
   const ws = weekStart();
   const week = (data.personal?.workouts || []).filter((w) => w.date >= ws);
   const studyMin = data.sessions
     .filter((s) => s.date >= ws)
     .reduce((s, x) => s + Number(x.minutes), 0);
-
   const studyGoal = live(data).reduce((s, c) => s + Number(c.weeklyMinutes || 0), 0);
 
-  const tiles = [
-    { label: "Overall GPA", value: gpa, note: `${graded.length} course${graded.length === 1 ? "" : "s"} graded` },
-    { label: "Cards ready", value: due, note: due ? "review waiting" : "all caught up" },
-    {
-      label: "Gym this week",
-      value: gymDays(week),
-      note: `of ${data.personal?.gymTarget || 0} days`,
-    },
-    {
-      label: "Miles this week",
-      value: sumMiles(week),
-      note: `of ${data.personal?.milesTarget || 0} mi`,
-    },
-    {
-      label: "Study this week",
-      value: `${(studyMin / 60).toFixed(1)}h`,
-      note: studyGoal ? `of ${(studyGoal / 60).toFixed(1)}h goal` : "no goal set",
-    },
-  ];
+  const gymTarget = Number(data.personal?.gymTarget || 0);
+  const milesTarget = Number(data.personal?.milesTarget || 0);
 
   return (
     <div style={S.heroWrap}>
+      <Rose />
+
       <p style={S.eyebrow} className="hero">
         {new Date()
           .toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })
@@ -724,9 +948,9 @@ function Greeting({ data, go }) {
         {BAND_TITLE[band]}, <em>{PILOT}</em>.
       </h1>
 
-      <p style={S.heroSub} className="hero-2">
-        {line}
-      </p>
+      <p style={S.heroSub} className="hero-2">{line}</p>
+
+      <div className="horizon hero-2" />
 
       <div style={{ marginTop: 22 }} className="hero-2">
         <button style={S.btn} className="btn cta" onClick={() => go("cards")}>
@@ -738,17 +962,56 @@ function Greeting({ data, go }) {
       </div>
 
       <div className="tiles hero-3">
-        {tiles.map((t) => (
-          <div className="tile" key={t.label}>
-            <p style={S.tileLabel}>{t.label}</p>
-            <p style={S.tileValue}>{t.value}</p>
-            <p style={S.tileNote}>{t.note}</p>
-          </div>
-        ))}
+        <div className="tile">
+          <p style={S.tileLabel}>Overall GPA</p>
+          <p style={S.tileValue}>
+            {gpa === null ? "—" : <Drum value={gpa} decimals={2} />}
+          </p>
+          <p style={S.tileNote}>
+            {graded.length} course{graded.length === 1 ? "" : "s"} graded
+          </p>
+        </div>
+
+        <div className="tile">
+          <p style={S.tileLabel}>Cards ready</p>
+          <p style={S.tileValue}><Drum value={due} /></p>
+          <p style={S.tileNote}>{due ? "review waiting" : "all caught up"}</p>
+        </div>
+
+        <div className="tile gauge-tile">
+          <p style={S.tileLabel}>Gym this week</p>
+          <Dial value={gymDays(week)} max={gymTarget} label="Gym days" />
+          <p style={S.tileValue}>
+            <Drum value={gymDays(week)} />
+            <span style={S.tileOf}>/{gymTarget}</span>
+          </p>
+          <p style={S.tileNote}>days</p>
+        </div>
+
+        <div className="tile gauge-tile">
+          <p style={S.tileLabel}>Miles this week</p>
+          <Dial value={sumMiles(week)} max={milesTarget} label="Miles" />
+          <p style={S.tileValue}>
+            <Drum value={sumMiles(week)} decimals={1} />
+            <span style={S.tileOf}>/{milesTarget}</span>
+          </p>
+          <p style={S.tileNote}>miles</p>
+        </div>
+
+        <div className="tile gauge-tile">
+          <p style={S.tileLabel}>Study this week</p>
+          <Dial value={studyMin} max={studyGoal} label="Study minutes" />
+          <p style={S.tileValue}>
+            <Drum value={studyMin / 60} decimals={1} suffix="h" />
+          </p>
+          <p style={S.tileNote}>
+            of {studyGoal ? (studyGoal / 60).toFixed(1) : 0}h
+          </p>
+        </div>
       </div>
 
       <p style={S.strip} className="hero-3">
-        {statusStrip(data)}
+        <Atis text={strip} />
       </p>
     </div>
   );
@@ -764,46 +1027,48 @@ export default function CollegeHub() {
   const [tab, setTab] = useState("home");
   const [openCourse, setOpenCourse] = useState(null);
   const first = useRef(true);
+  const cabin = useCabin();
+  const visited = useRef(new Set());
 
- useEffect(() => {
-  supabase.auth.getSession().then(async ({ data: { session } }) => {
-    const signedInUser = session?.user || null;
+  useEffect(() => {
+    supabase.auth.getSession().then(async ({ data: { session } }) => {
+      const signedInUser = session?.user || null;
 
-    if (
-      signedInUser &&
-      signedInUser.email?.toLowerCase() !== ALLOWED_EMAIL.toLowerCase()
-    ) {
-      await supabase.auth.signOut();
-      setUser(null);
+      if (
+        signedInUser &&
+        signedInUser.email?.toLowerCase() !== ALLOWED_EMAIL.toLowerCase()
+      ) {
+        await supabase.auth.signOut();
+        setUser(null);
+        setAuthLoading(false);
+        return;
+      }
+
+      setUser(signedInUser);
       setAuthLoading(false);
-      return;
-    }
+    });
 
-    setUser(signedInUser);
-    setAuthLoading(false);
-  });
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      const signedInUser = session?.user || null;
 
-  const {
-    data: { subscription },
-  } = supabase.auth.onAuthStateChange(async (_event, session) => {
-    const signedInUser = session?.user || null;
+      if (
+        signedInUser &&
+        signedInUser.email?.toLowerCase() !== ALLOWED_EMAIL.toLowerCase()
+      ) {
+        await supabase.auth.signOut();
+        setUser(null);
+        setAuthLoading(false);
+        return;
+      }
 
-    if (
-      signedInUser &&
-      signedInUser.email?.toLowerCase() !== ALLOWED_EMAIL.toLowerCase()
-    ) {
-      await supabase.auth.signOut();
-      setUser(null);
+      setUser(signedInUser);
       setAuthLoading(false);
-      return;
-    }
+    });
 
-    setUser(signedInUser);
-    setAuthLoading(false);
-  });
-
-  return () => subscription.unsubscribe();
-}, []);
+    return () => subscription.unsubscribe();
+  }, []);
 
   useEffect(() => {
     if (!user) {
@@ -884,41 +1149,69 @@ export default function CollegeHub() {
     await supabase.auth.signOut();
   };
 
+  const [walking, setWalking] = useState(false);
+  useEffect(() => {
+    if (!data) return;
+    if (visited.current.has(tab)) {
+      setWalking(false);
+      return;
+    }
+    visited.current.add(tab);
+    setWalking(true);
+    const t = setTimeout(() => setWalking(false), 2200);
+    return () => clearTimeout(t);
+  }, [tab, !!data]);
+
   const update = (fn) => setData((d) => fn({ ...d }));
 
   if (authLoading) {
-    return <div style={S.page}>Loading…</div>;
+    return (
+      <div style={{ ...S.page, ...cabin.vars }} className={`hub ${cabin.phase}`}>
+        <style>{CSS}</style>
+        <p style={{ paddingTop: 80, ...S.dim }}>Loading…</p>
+      </div>
+    );
   }
 
   if (!user) {
     return (
-      <div style={S.page}>
+      <div style={{ ...S.page, ...cabin.vars }} className={`hub ${cabin.phase}`}>
         <style>{CSS}</style>
-        <div style={{ paddingTop: 80, maxWidth: 480 }}>
-          <p style={S.eyebrow}>FLIGHTPLAN</p>
-          <h1 style={{ fontSize: 42 }}>Your data, everywhere.</h1>
-          <p style={S.dim}>
+        <div style={{ paddingTop: 90, maxWidth: 520, position: "relative" }}>
+          <Rose />
+          <p style={S.eyebrow} className="hero">FLIGHTPLAN</p>
+          <h1 className="hero-h hero" style={{ marginTop: 14 }}>
+            Your data, <em>everywhere</em>.
+          </h1>
+          <div className="horizon hero-2" />
+          <p style={{ ...S.heroSub, fontSize: 16 }} className="hero-2">
             Sign in with Google to sync FlightPlan across your devices.
           </p>
-
-          <button style={S.btn} className="btn cta" onClick={signIn}>
-            Continue with Google
-          </button>
+          <div style={{ marginTop: 22 }} className="hero-2">
+            <button style={S.btn} className="btn cta" onClick={signIn}>
+              Continue with Google
+            </button>
+          </div>
         </div>
       </div>
     );
   }
 
   if (!data) {
-    return <div style={S.page}>Loading FlightPlan…</div>;
+    return (
+      <div style={{ ...S.page, ...cabin.vars }} className={`hub ${cabin.phase}`}>
+        <style>{CSS}</style>
+        <p style={{ paddingTop: 80, ...S.dim }}>Loading FlightPlan…</p>
+      </div>
+    );
   }
 
   return (
-    <div style={S.page} className="hub">
+    <div style={{ ...S.page, ...cabin.vars }} className={`hub ${cabin.phase}`}>
       <style>{CSS}</style>
 
       <header className="bar">
-        <span className="mark">✈</span>
+        <Mark />
         <span style={S.wordmark}>FlightPlan</span>
 
         <div className="nav">
@@ -946,7 +1239,7 @@ export default function CollegeHub() {
 
         <button
           style={S.btn}
-       className="btn cta cta-desktop"
+          className="btn cta cta-desktop"
           onClick={() => {
             setTab("cards");
             setOpenCourse(null);
@@ -954,16 +1247,12 @@ export default function CollegeHub() {
         >
           Start studying
         </button>
-         <button
-  style={S.btn}
-  className="btn"
-  onClick={signOut}
->
-  Sign out
-</button>
+        <button style={S.btn} className="btn" onClick={signOut}>
+          Sign out
+        </button>
       </header>
 
-      <main key={tab} className="view">
+      <main key={tab} className={walking ? "view walk" : "view"}>
         {tab === "home" && <Home data={data} go={setTab} />}
         {tab === "cards" && <CardsTab data={data} update={update} />}
         {tab === "study" && <StudyTab data={data} update={update} />}
@@ -983,6 +1272,8 @@ export default function CollegeHub() {
           ))}
         {tab === "data" && <DataTab data={data} setData={setData} />}
       </main>
+
+      <Windsock data={data} />
 
       <footer style={S.footer}>
         <button style={S.footLink} className="btn" onClick={() => setTab(tab === "data" ? "home" : "data")}>
@@ -1049,7 +1340,7 @@ function Home({ data, go }) {
                 {g.current === null ? "—" : `${g.current.toFixed(1)}% (${letterFor(g.current)})`}
               </td>
               <td style={S.td}>{c.target}%</td>
-              <td style={{ ...S.td, color: gap === null ? "#8C837A" : gap < 0 ? "#B4674A" : "#7C8471" }}>
+              <td style={{ ...S.td, color: gap === null ? "#6B7F73" : gap < 0 ? "#C4705A" : "#6FBF8F" }}>
                 {gap === null ? "—" : `${gap > 0 ? "+" : ""}${gap.toFixed(1)}`}
               </td>
               <td style={S.td}>{g.totalWeight ? `${g.remaining}%` : "—"}</td>
@@ -1178,10 +1469,10 @@ function Bar({ value, max }) {
 }
 
 /* ============================================================
-   CARDS — browse, filter, review by scope
+   CARDS
    ============================================================ */
 function CardsTab({ data, update }) {
-  const [review, setReview] = useState(null); // {ids:[], label}
+  const [review, setReview] = useState(null);
   const [view, setView] = useState("decks");
 
   if (review)
@@ -1218,7 +1509,7 @@ function Decks({ data, start }) {
         <button
           style={S.btn} className="btn"
           disabled={!coreDue.length}
-          onClick={() => start({ ids: coreDue.map((c) => c.id), label: "Aviation core" })}
+          onClick={() => start({ ids: coreDue.map((c) => c.id), label: "Aviation" })}
         >
           All aviation ({coreDue.length})
         </button>
@@ -1678,9 +1969,13 @@ function Review({ data, update, scope, done }) {
   const [revealed, setRevealed] = useState(false);
   const [right, setRight] = useState(0);
   const [missedIds, setMissedIds] = useState([]);
+  const [anim, setAnim] = useState("taxi");
   const card = round[i];
 
   const grade = (correct) => {
+    if (anim !== "taxi") return;
+    setAnim(correct ? "takeoff" : "divert");
+
     update((d) => {
       d.cards = d.cards.map((c) => {
         if (c.id !== card.id) return c;
@@ -1696,10 +1991,15 @@ function Review({ data, update, scope, done }) {
       });
       return d;
     });
-    if (correct) setRight(right + 1);
-    else setMissedIds([...missedIds, card.id]);
-    setRevealed(false);
-    setI(i + 1);
+
+    const id = card.id;
+    setTimeout(() => {
+      if (correct) setRight((r) => r + 1);
+      else setMissedIds((m) => [...m, id]);
+      setRevealed(false);
+      setI((x) => x + 1);
+      setAnim("taxi");
+    }, 460);
   };
 
   const retryMissed = () => {
@@ -1709,6 +2009,7 @@ function Review({ data, update, scope, done }) {
     setRight(0);
     setI(0);
     setRevealed(false);
+    setAnim("taxi");
   };
 
   if (!card)
@@ -1734,10 +2035,18 @@ function Review({ data, update, scope, done }) {
         {code}
         {card.topic ? ` · ${card.topic}` : ""} · box {card.box}
       </p>
-      <div style={S.card}>
+
+      <div className="fuel-row">
+        <Dial value={round.length - i} max={round.length} label="Cards remaining" size={54} />
+        <span style={S.dim}>
+          {round.length - i} of {round.length} remaining
+        </span>
+      </div>
+
+      <div key={card.id} className={`plane ${anim}`} style={S.card}>
         {card.front && <p style={{ fontSize: 18 }}>{card.front}</p>}
         {card.frontImg && <img src={card.frontImg} alt="" style={S.cardImg} />}
-        {revealed ? (            
+        {revealed ? (
           <div className="flip">
             <hr />
             {card.back && <pre style={S.pre}>{card.back}</pre>}
@@ -1745,17 +2054,18 @@ function Review({ data, update, scope, done }) {
             <button style={S.btn} className="btn" onClick={() => grade(false)}>Missed it</button>
             <button style={S.btn} className="btn" onClick={() => grade(true)}>Got it</button>
           </div>
-               ) : (
+        ) : (
           <button style={S.btn} className="btn" onClick={() => setRevealed(true)}>Show answer</button>
         )}
       </div>
+
       <button style={S.btn} className="btn" onClick={done}>Stop</button>
     </Section>
   );
 }
 
 /* ============================================================
-   STUDY — timer + sessions
+   STUDY
    ============================================================ */
 function StudyTab({ data, update }) {
   const [sub, setSub] = useState("log");
@@ -2468,7 +2778,7 @@ function CourseTargets({ data, update }) {
 }
 
 /* ============================================================
-   PERSONAL — gym log, records, life goals
+   PERSONAL
    ============================================================ */
 function PersonalTab({ data, update }) {
   const [sub, setSub] = useState("gym");
@@ -2561,6 +2871,17 @@ function Gym({ data, update }) {
   return (
     <div>
       <Section title="This week">
+        <div className="dial-pair">
+          <div>
+            <Dial value={gymDays(thisWeek)} max={target} label="Gym days" size={92} />
+            <p style={S.dialCap}>GYM DAYS</p>
+          </div>
+          <div>
+            <Dial value={sumMiles(thisWeek)} max={milesTarget} label="Miles" size={92} />
+            <p style={S.dialCap}>MILES</p>
+          </div>
+        </div>
+
         <p style={{ fontSize: 20, margin: "4px 0" }}>
           {gymDays(thisWeek)} / {target} gym days
         </p>
@@ -2687,10 +3008,10 @@ function Gym({ data, update }) {
                     </td>
                     <td style={S.td}>{b.miles || "—"}</td>
                     <td style={S.td}>{b.minutes}</td>
-                    <td style={{ ...S.td, color: b.days >= target ? "#7C8471" : "#B4674A" }}>
+                    <td style={{ ...S.td, color: b.days >= target ? "#6FBF8F" : "#C4705A" }}>
                       {b.days >= target ? "yes" : "no"}
                     </td>
-                    <td style={{ ...S.td, color: b.miles >= milesTarget ? "#7C8471" : "#B4674A" }}>
+                    <td style={{ ...S.td, color: b.miles >= milesTarget ? "#6FBF8F" : "#C4705A" }}>
                       {b.miles >= milesTarget ? "yes" : "no"}
                     </td>
                   </tr>
@@ -2959,7 +3280,7 @@ function CourseList({ data, update, open }) {
       .map((l) => {
         const [c, n, t] = l.split("|").map((x) => (x || "").trim());
         if (!c) return null;
-        return newCourse(c, n || c, /core/i.test(t || "") ? "core" : t ? "support" : "core", term.trim());
+        return newCourse(c, n || c, /core|avia/i.test(t || "") ? "core" : t ? "support" : "core", term.trim());
       })
       .filter(Boolean);
     if (!rows.length) return;
@@ -3335,9 +3656,7 @@ function DataTab({ data, setData }) {
           const imgs = data.cards.filter((c) => c.frontImg || c.backImg).length;
           return (
             <p style={kb > 3500 ? S.late : S.dim}>
-              Stored size: {kb} KB of roughly 5,000 KB · {imgs} card
-              {imgs === 1 ? "" : "s"} with images.
-              {kb > 3500 && " Getting close to the cap — delete some image cards."}
+              Stored size: {kb} KB · {imgs} card{imgs === 1 ? "" : "s"} with images.
             </p>
           );
         })()}
@@ -3393,7 +3712,6 @@ const CSS = `
   * { box-sizing: border-box; }
 
   .hub {
-    --ground: #0D1411;
     --surface: #141E19;
     --raised: #1B2822;
     --line: #26362E;
@@ -3405,19 +3723,34 @@ const CSS = `
     --muted: #8FA396;
     --faint: #6B7F73;
     --alert: #C4705A;
+    --lamp: #7FB2D4;
+    --glow1: rgba(127,178,212,.20);
+    --glow2: rgba(62,142,99,.17);
+    transition: background 3s linear;
   }
 
-  .hub ::selection { background: var(--green); color: #0D1411; }
-
-  /* green light pooling behind the hero, the way the reference glows */
+  /* cabin lighting — ambient wash walks through the day */
   .hub::before {
     content: "";
     position: fixed; inset: 0; pointer-events: none; z-index: 0;
     background:
-      radial-gradient(900px 520px at 78% -6%, rgba(62,142,99,.20), transparent 62%),
-      radial-gradient(620px 420px at 6% 4%, rgba(31,81,56,.22), transparent 60%);
+      radial-gradient(900px 520px at 78% -6%, var(--glow1), transparent 62%),
+      radial-gradient(620px 420px at 6% 4%, var(--glow2), transparent 60%);
+    transition: background 3s linear;
   }
   .hub > * { position: relative; z-index: 1; }
+
+  /* night vision: instruments and micro-labels go red */
+  .hub.night { --muted: #A08C88; --faint: #7E6A67; }
+  .hub.night .dial-arc { stroke: var(--lamp); }
+  .hub.night .dial-needle polygon { fill: var(--lamp); }
+  .hub.night .dial-tick.major { stroke: var(--lamp); }
+  .hub.night h3 { color: var(--lamp); }
+  .hub.night .caret { background: var(--lamp); }
+  .hub.night .sock .s1 { fill: var(--lamp); }
+  .hub.night .sock .s3 { fill: #8A3830; }
+
+  .hub ::selection { background: var(--green); color: #0D1411; }
 
   .hub button:focus-visible, .hub input:focus-visible,
   .hub textarea:focus-visible, .hub select:focus-visible {
@@ -3436,23 +3769,39 @@ const CSS = `
   .hub input[type="date"] { color-scheme: dark; }
   .hub input[type="checkbox"] { accent-color: var(--green); }
 
-  /* sticky product bar */
+  /* header */
   .hub .bar {
     display: flex; align-items: center; gap: 18px;
     padding: 14px 0;
     margin-bottom: 8px;
     border-bottom: 1px solid var(--line);
   }
-
   .hub .mark {
     display: inline-flex; align-items: center; justify-content: center;
     width: 34px; height: 34px; flex: none;
     border-radius: 10px;
     border: 1px solid var(--edge);
     background: linear-gradient(150deg, var(--green-deep), transparent);
-    color: var(--green-bright);
-    font-family: 'JetBrains Mono', monospace; font-size: 14px;
+    transition: transform .35s cubic-bezier(.22,.61,.36,1);
   }
+  .hub .bar:hover .mark { transform: translateX(3px) rotate(-8deg); }
+  .hub .mark-body { fill: var(--bone); opacity: .9; }
+  .hub .nav-red   { fill: #E0544A; animation: strobe 2.6s ease-in-out infinite; }
+  .hub .nav-green { fill: #62D08C; animation: strobe 2.6s ease-in-out .18s infinite; }
+  @keyframes strobe {
+    0%, 84%, 100% { opacity: .28; }
+    88%, 94% { opacity: 1; }
+  }
+
+  /* nav scrolls sideways instead of wrapping */
+  .hub .nav {
+    display: flex; align-items: center; gap: 2px;
+    flex: 1; min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .hub .nav::-webkit-scrollbar { display: none; }
+  .hub .nav .tab { flex: none; white-space: nowrap; }
 
   .hub .tab {
     background: none; border: none;
@@ -3466,11 +3815,22 @@ const CSS = `
   .hub .tab:hover { color: var(--bone); background: rgba(62,142,99,.10); }
   .hub .tab.on { color: var(--green-bright); background: rgba(62,142,99,.14); }
 
-  /* buttons: filled primary pill + outlined secondary, per the reference */
+  /* buttons + prop wash */
   .hub .btn {
+    position: relative;
+    overflow: hidden;
     border-radius: 999px;
-    transition: border-color .15s ease, color .15s ease, background .15s ease, transform .1s ease;
+    transition: border-color .15s ease, color .15s ease, transform .1s ease;
   }
+  .hub .btn::after {
+    content: "";
+    position: absolute; inset: 0;
+    background: linear-gradient(105deg, transparent 30%, rgba(111,191,143,.18) 50%, transparent 70%);
+    transform: translateX(-120%);
+    transition: transform .55s cubic-bezier(.22,.61,.36,1);
+    pointer-events: none;
+  }
+  .hub .btn:hover:not([disabled])::after { transform: translateX(120%); }
   .hub .btn:hover:not([disabled]) { border-color: var(--green); color: var(--green-bright); }
   .hub .btn:active:not([disabled]) { transform: translateY(1px); }
 
@@ -3500,10 +3860,51 @@ const CSS = `
     -webkit-background-clip: text; background-clip: text;
     -webkit-text-fill-color: transparent; color: transparent;
   }
-  .hub .hero { animation: rise .6s cubic-bezier(.22,.61,.36,1) both; }
+  .hub .hero   { animation: rise .6s cubic-bezier(.22,.61,.36,1) both; }
   .hub .hero-2 { animation: rise .6s .1s cubic-bezier(.22,.61,.36,1) both; }
   .hub .hero-3 { animation: rise .6s .2s cubic-bezier(.22,.61,.36,1) both; }
   @keyframes rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+
+  /* attitude indicator: banked on arrival, levels out */
+  .hub .horizon {
+    position: relative;
+    height: 1px; max-width: 420px;
+    margin: 20px 0 0;
+    background: linear-gradient(90deg, transparent, var(--lamp) 14%, var(--lamp) 86%, transparent);
+    animation: level 1.6s .3s cubic-bezier(.22,.61,.36,1) both;
+  }
+  .hub .horizon::before, .hub .horizon::after {
+    content: "";
+    position: absolute; top: -5px;
+    width: 1px; height: 11px; background: var(--lamp);
+  }
+  .hub .horizon::before { left: 14%; }
+  .hub .horizon::after  { right: 14%; }
+  @keyframes level {
+    0%   { transform: rotate(-4.5deg); opacity: 0; }
+    45%  { opacity: 1; }
+    70%  { transform: rotate(1.2deg); }
+    100% { transform: none; opacity: 1; }
+  }
+
+  /* compass rose watermark */
+  .hub .rose {
+    position: absolute;
+    right: -30px; top: 10px;
+    width: 300px; height: 300px;
+    pointer-events: none;
+    opacity: .10;
+    fill: none;
+    stroke: var(--green-bright);
+    stroke-width: 1;
+    animation: roseIn 2.4s cubic-bezier(.22,.61,.36,1) both;
+  }
+  .hub .rose .rose-major { stroke-width: 2; }
+  .hub .rose .rose-n { fill: var(--green-bright); stroke: none; }
+  @keyframes roseIn {
+    from { opacity: 0; transform: rotate(-14deg) scale(.94); }
+    to   { opacity: .10; transform: none; }
+  }
 
   /* stat tiles */
   .hub .tiles {
@@ -3511,6 +3912,7 @@ const CSS = `
     grid-template-columns: repeat(5, minmax(0, 1fr));
   }
   .hub .tile {
+    position: relative;
     border: 1px solid var(--line);
     border-radius: 14px;
     background: linear-gradient(160deg, rgba(62,142,99,.07), transparent 60%), var(--surface);
@@ -3520,10 +3922,166 @@ const CSS = `
   }
   .hub .tile p { overflow-wrap: anywhere; }
   .hub .tile:hover { border-color: var(--edge); transform: translateY(-2px); }
+  .hub .gauge-tile { text-align: center; }
+  .hub .gauge-tile .dial { margin: 6px auto 2px; display: block; }
 
+  /* instrument dial */
+  .hub .dial-face  { fill: rgba(9,13,11,.55); }
+  .hub .dial-bezel { fill: none; stroke: var(--line); stroke-width: 2; }
+  .hub .dial-track { fill: none; stroke: var(--line); stroke-width: 4; stroke-linecap: round; }
+  .hub .dial-arc {
+    fill: none; stroke: var(--green); stroke-width: 4; stroke-linecap: round;
+    transition: stroke .3s ease;
+  }
+  .hub .dial.met .dial-arc { stroke: var(--green-bright); }
+  .hub .dial-tick { stroke: var(--faint); stroke-width: 1; }
+  .hub .dial-tick.major { stroke: var(--muted); stroke-width: 2; }
+  .hub .dial-needle {
+    transform-origin: 50px 50px;
+    transition: transform 1.25s cubic-bezier(.32,1.5,.56,1);
+  }
+  .hub .dial-needle polygon { fill: var(--bone); }
+  .hub .dial.met .dial-needle polygon { fill: var(--green-bright); }
+  .hub .dial-hub { fill: var(--edge); stroke: var(--muted); stroke-width: 1; }
+
+  .hub .dial-pair {
+    display: flex; gap: 22px; flex-wrap: wrap;
+    justify-content: center; text-align: center;
+    margin-bottom: 14px;
+  }
+
+  /* altimeter drum */
+  .hub .drum { display: inline-flex; align-items: baseline; }
+  .hub .drum-win {
+    display: inline-block;
+    height: 1.1em; width: .62em;
+    overflow: hidden;
+    vertical-align: baseline;
+  }
+  .hub .drum-col {
+    display: flex; flex-direction: column;
+    transition: transform 1.1s cubic-bezier(.22,.61,.36,1);
+  }
+  .hub .drum-col > span { height: 1.1em; line-height: 1.1em; }
+  .hub .drum-fixed { display: inline-block; }
+
+  /* ATIS caret */
+  .hub .caret {
+    display: inline-block;
+    width: 6px; height: 11px;
+    margin-left: 2px;
+    background: var(--green-bright);
+    vertical-align: -1px;
+    animation: blink .9s steps(1) infinite;
+  }
+  @keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+
+  /* windsock */
+  .hub .sock-wrap {
+    position: fixed;
+    right: 16px; bottom: 16px;
+    z-index: 15;
+    opacity: .85;
+    text-align: center;
+  }
+  .hub .sock-pole { stroke: var(--edge); stroke-width: 2.4; }
+  .hub .sock-ring { fill: var(--muted); }
+  .hub .sock { transform-origin: 16px 18px; transition: transform 1.4s cubic-bezier(.22,.61,.36,1); }
+  .hub .sock polygon { animation-name: flap; animation-timing-function: ease-in-out; animation-iteration-count: infinite; animation-duration: inherit; }
+  .hub .sock .s1 { fill: var(--green-bright); }
+  .hub .sock .s2 { fill: var(--bone); opacity: .82; animation-delay: .09s; }
+  .hub .sock .s3 { fill: var(--green); animation-delay: .18s; }
+  @keyframes flap {
+    0%, 100% { transform: translateY(0) skewY(0deg); }
+    50%      { transform: translateY(-1.4px) skewY(-2.2deg); }
+  }
+  .hub .sock-cap {
+    display: block;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 8px; letter-spacing: .2em;
+    color: var(--faint);
+    margin-top: -6px;
+  }
+
+  /* panels */
   .hub .panel {
     border-radius: 16px;
     box-shadow: 0 10px 30px rgba(0,0,0,.30);
+    animation: panelIn .5s cubic-bezier(.22,.61,.36,1) both;
+    transition: border-color .18s ease;
+  }
+  .hub .panel:hover { border-color: var(--edge); }
+  .hub .panel:nth-child(1) { animation-delay: .04s; }
+  .hub .panel:nth-child(2) { animation-delay: .10s; }
+  .hub .panel:nth-child(3) { animation-delay: .16s; }
+  .hub .panel:nth-child(4) { animation-delay: .22s; }
+  .hub .panel:nth-child(5) { animation-delay: .28s; }
+  .hub .panel:nth-child(n+6) { animation-delay: .32s; }
+  @keyframes panelIn {
+    from { opacity: 0; transform: translateY(16px); }
+    to   { opacity: 1; transform: none; }
+  }
+
+  /* preflight walkaround — first time you land on a tab this session */
+  .hub .walk .panel { position: relative; overflow: hidden; }
+  .hub .walk .panel::before {
+    content: "";
+    position: absolute; inset: 0;
+    background: linear-gradient(100deg, transparent 20%, rgba(255,255,255,.07) 50%, transparent 80%);
+    transform: translateX(-110%);
+    animation: walkLamp 1.05s cubic-bezier(.4,0,.2,1) both;
+    pointer-events: none;
+    z-index: 2;
+  }
+  .hub .walk .panel:nth-child(1)::before { animation-delay: .10s; }
+  .hub .walk .panel:nth-child(2)::before { animation-delay: .28s; }
+  .hub .walk .panel:nth-child(3)::before { animation-delay: .46s; }
+  .hub .walk .panel:nth-child(4)::before { animation-delay: .64s; }
+  .hub .walk .panel:nth-child(5)::before { animation-delay: .82s; }
+  .hub .walk .panel:nth-child(n+6)::before { animation-delay: .96s; }
+  @keyframes walkLamp { to { transform: translateX(110%); } }
+
+  /* view transition */
+  .hub .view { animation: viewIn .34s cubic-bezier(.22,.61,.36,1) both; }
+  @keyframes viewIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to   { opacity: 1; transform: none; }
+  }
+
+  /* review: taxi in, aileron roll, takeoff, divert */
+  .hub .plane { transform-origin: center center; will-change: transform, opacity; }
+  .hub .plane.taxi    { animation: taxiIn .42s cubic-bezier(.22,.61,.36,1) both; }
+  .hub .plane.takeoff { animation: takeoff .46s cubic-bezier(.4,0,.7,.2) both; }
+  .hub .plane.divert  { animation: divert .46s cubic-bezier(.4,0,.7,.2) both; }
+
+  @keyframes taxiIn {
+    from { opacity: 0; transform: translateY(20px) scale(.955); }
+    to   { opacity: 1; transform: none; }
+  }
+  @keyframes takeoff {
+    0%   { opacity: 1; transform: none; }
+    18%  { transform: translateY(2px); }
+    100% { opacity: 0; transform: translate(90px, -190px) rotate(-11deg) scale(1.04); }
+  }
+  @keyframes divert {
+    0%   { opacity: 1; transform: none; }
+    22%  { transform: translateX(-8px) rotate(-2deg); }
+    100% { opacity: 0; transform: translate(-160px, 46px) rotate(16deg) scale(.94); }
+  }
+
+  .hub .flip {
+    animation: rollIn .46s cubic-bezier(.22,.61,.36,1) both;
+    transform-origin: center center;
+  }
+  @keyframes rollIn {
+    0%   { opacity: 0; transform: perspective(900px) rotateY(-56deg) rotateZ(-5deg) translateX(20px); }
+    62%  { opacity: 1; transform: perspective(900px) rotateY(9deg) rotateZ(1.6deg); }
+    100% { transform: none; }
+  }
+
+  .hub .fuel-row {
+    display: flex; align-items: center; gap: 12px;
+    margin-bottom: 10px;
   }
 
   .hub .gauge {
@@ -3541,6 +4099,8 @@ const CSS = `
   .hub .gauge.met span { background: linear-gradient(90deg, var(--green), var(--green-bright)); }
 
   .hub table { font-variant-numeric: tabular-nums; }
+  .hub tbody tr { transition: background .15s ease; }
+  .hub tbody tr:hover { background: rgba(62,142,99,.06); }
   .hub hr { border: none; border-top: 1px solid var(--line); margin: 14px 0; }
   .hub optgroup { color: var(--muted); background: var(--raised); }
   .hub option { color: var(--bone); background: var(--raised); }
@@ -3549,66 +4109,16 @@ const CSS = `
   .hub ol li::marker, .hub ul li::marker { color: var(--green); }
 
   @media (prefers-reduced-motion: reduce) {
-    .hub .hero, .hub .hero-2, .hub .hero-3 { animation: none; }
-    .hub .gauge span, .hub .tile { transition: none; }
+    .hub .hero, .hub .hero-2, .hub .hero-3, .hub .view, .hub .panel,
+    .hub .flip, .hub .plane, .hub .rose, .hub .horizon,
+    .hub .walk .panel::before, .hub .sock polygon,
+    .hub .nav-red, .hub .nav-green, .hub .caret { animation: none; }
+    .hub .dial-needle, .hub .drum-col, .hub .gauge span, .hub .tile, .hub .sock { transition: none; }
   }
 
   @media (max-width: 940px) {
     .hub .tiles { grid-template-columns: repeat(3, 1fr); }
-  }
-
-  /* nav scrolls sideways instead of wrapping into a pile */
-  .hub .nav {
-    display: flex; align-items: center; gap: 2px;
-    flex: 1; min-width: 0;
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-  .hub .nav::-webkit-scrollbar { display: none; }
-  .hub .nav .tab { flex: none; white-space: nowrap; }
-
-  /* view swaps in when you change tabs */
-  .hub .view { animation: viewIn .34s cubic-bezier(.22,.61,.36,1) both; }
-  @keyframes viewIn {
-    from { opacity: 0; transform: translateY(10px); }
-    to { opacity: 1; transform: none; }
-  }
-
-  /* panels stagger in underneath it */
-  .hub .panel { animation: panelIn .5s cubic-bezier(.22,.61,.36,1) both; }
-  .hub .panel:nth-child(1) { animation-delay: .04s; }
-  .hub .panel:nth-child(2) { animation-delay: .10s; }
-  .hub .panel:nth-child(3) { animation-delay: .16s; }
-  .hub .panel:nth-child(4) { animation-delay: .22s; }
-  .hub .panel:nth-child(5) { animation-delay: .28s; }
-  .hub .panel:nth-child(n+6) { animation-delay: .32s; }
-  @keyframes panelIn {
-    from { opacity: 0; transform: translateY(16px); }
-    to { opacity: 1; transform: none; }
-  }
-  .hub .panel:hover { border-color: var(--edge); }
-
-  /* answer flips up when revealed */
-  .hub .flip { animation: flipIn .4s cubic-bezier(.22,.61,.36,1) both; transform-origin: top center; }
-  @keyframes flipIn {
-    from { opacity: 0; transform: perspective(700px) rotateX(-32deg); }
-    to { opacity: 1; transform: none; }
-  }
-
-  .hub tbody tr { transition: background .15s ease; }
-  .hub tbody tr:hover { background: rgba(62,142,99,.06); }
-
-  .hub .mark { transition: transform .3s cubic-bezier(.22,.61,.36,1); }
-  .hub .bar:hover .mark { transform: translateX(3px) rotate(-10deg); }
-
-  @media (prefers-reduced-motion: reduce) {
-    .hub .hero, .hub .hero-2, .hub .hero-3,
-    .hub .view, .hub .panel, .hub .flip { animation: none; }
-    .hub .gauge span, .hub .tile { transition: none; }
-  }
-
-  @media (max-width: 940px) {
-    .hub .tiles { grid-template-columns: repeat(3, 1fr); }
+    .hub .rose { width: 220px; right: -60px; opacity: .07; }
   }
 
   @media (max-width: 720px) {
@@ -3619,9 +4129,12 @@ const CSS = `
 
     .hub .tiles { grid-template-columns: repeat(2, 1fr); gap: 10px; }
     .hub .tile { padding: 12px; }
+    .hub .gauge-tile .dial { width: 62px; height: 62px; }
     .hub .tab { font-size: 13px; padding: 6px 9px; }
+    .hub .rose { display: none; }
 
-    /* wide tables scroll instead of blowing out the page */
+    .hub .sock-wrap { right: 8px; bottom: 8px; transform: scale(.8); transform-origin: bottom right; }
+
     .hub table {
       display: block;
       overflow-x: auto;
@@ -3629,7 +4142,6 @@ const CSS = `
       -webkit-overflow-scrolling: touch;
     }
 
-    /* inputs stop overflowing — checkboxes excluded */
     .hub input:not([type="checkbox"]):not([type="file"]),
     .hub select,
     .hub textarea {
@@ -3642,7 +4154,6 @@ const CSS = `
     .hub .panel { border-radius: 14px; }
   }
 `;
-
 
 const BODY = "'Inter', system-ui, -apple-system, sans-serif";
 const MONO = "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace";
@@ -3660,11 +4171,9 @@ const S = {
     lineHeight: 1.55,
   },
   wordmark: { fontSize: 17, fontWeight: 700, letterSpacing: "-.02em", color: "#E8EFE9" },
-  version: { fontFamily: MONO, fontSize: 10, letterSpacing: ".16em", color: "#6B7F73", textTransform: "uppercase" },
-  navWrap: { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 2, flex: 1 },
   subnav: { display: "flex", flexWrap: "wrap", gap: 4, margin: "0 0 16px" },
 
-  heroWrap: { padding: "44px 0 8px" },
+  heroWrap: { padding: "44px 0 8px", position: "relative", overflow: "hidden" },
   eyebrow: {
     fontFamily: MONO,
     fontSize: 11,
@@ -3674,7 +4183,6 @@ const S = {
     margin: 0,
   },
   heroSub: { fontSize: "clamp(16px, 2.2vw, 20px)", color: "#E8EFE9", fontWeight: 500, margin: "18px 0 0" },
-  heroBody: { fontSize: 15, color: "#8FA396", margin: "8px 0 0", maxWidth: 520 },
   strip: {
     fontFamily: MONO,
     fontSize: 11,
@@ -3684,6 +4192,7 @@ const S = {
     paddingTop: 14,
     borderTop: "1px solid #26362E",
     wordSpacing: ".2em",
+    minHeight: 30,
   },
   tileLabel: {
     fontFamily: MONO,
@@ -3695,6 +4204,14 @@ const S = {
   },
   tileValue: { fontSize: 23, fontWeight: 700, letterSpacing: "-.02em", margin: "6px 0 0", color: "#E8EFE9", lineHeight: 1.1 },
   tileNote: { fontSize: 11, color: "#8FA396", margin: "3px 0 0" },
+  tileOf: { fontSize: 13, color: "#6B7F73", fontWeight: 500, marginLeft: 2 },
+  dialCap: {
+    fontFamily: MONO,
+    fontSize: 9,
+    letterSpacing: ".16em",
+    color: "#6B7F73",
+    margin: "2px 0 0",
+  },
 
   section: {
     border: "1px solid #26362E",
