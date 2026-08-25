@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
+import { supabase } from "./supabase.js";
 
 /* ============================================================
    FLIGHTPLAN v1.0
