@@ -1745,6 +1745,7 @@ function Review({ data, update, scope, done }) {
             <button style={S.btn} className="btn" onClick={() => grade(false)}>Missed it</button>
             <button style={S.btn} className="btn" onClick={() => grade(true)}>Got it</button>
           </div>
+               ) : (
           <button style={S.btn} className="btn" onClick={() => setRevealed(true)}>Show answer</button>
         )}
       </div>
