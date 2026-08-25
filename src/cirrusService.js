@@ -166,6 +166,19 @@ export async function sendCirrusMessage({
 
   const reply = result.data?.reply;
   if (typeof reply !== "string" || !reply.trim()) {
+    // The contract is `{ reply: string }`. If a deployed function ever
+    // answers 200 with a different shape, name the keys we actually got
+    // so the mismatch is diagnosable instead of a dead end. Keys only —
+    // never the values, which are conversation content.
+    if (typeof console !== "undefined" && console.warn) {
+      const shape =
+        result.data && typeof result.data === "object"
+          ? Object.keys(result.data).join(", ") || "(no keys)"
+          : typeof result.data;
+      console.warn(
+        `[cirrus] Expected a "reply" string from cirrus-chat; received: ${shape}`
+      );
+    }
     return fail(CIRRUS_ERRORS.MALFORMED_PROVIDER_RESPONSE);
   }
 
