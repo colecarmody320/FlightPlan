@@ -197,16 +197,31 @@ interface GeminiResponse {
   };
 }
 
-function createGeminiProvider(rawApiKey: string, model: string): CirrusProvider {
-  // Secrets pasted through a dashboard commonly pick up a trailing
-  // newline or space. Google rejects those as API_KEY_INVALID, which
-  // surfaces as an opaque 400, so normalize before use.
+function createGeminiProvider(rawApiKey: string, rawModel: string): CirrusProvider {
+  // Values pasted through a dashboard commonly pick up a trailing
+  // newline or space. For the key Google answers API_KEY_INVALID; for
+  // the model the whitespace is percent-encoded into the request URL
+  // and comes back as "unexpected model name format". Both are opaque
+  // 400s, so normalize both before use.
   const apiKey = (rawApiKey || "").trim();
+  // Accept either "gemini-2.5-flash" or the fully-qualified
+  // "models/gemini-2.5-flash"; the prefix is added by the endpoint.
+  const model = (rawModel || "").trim().replace(/^models\//, "");
 
   if (!apiKey) {
-    throw new CirrusProviderError("server_misconfigured", "GEMINI_API_KEY is not set", {
-      status: 500,
-    });
+    throw new CirrusProviderError(
+      "server_misconfigured",
+      "GEMINI_API_KEY is not set",
+      { status: 500 },
+    );
+  }
+
+  if (!model) {
+    throw new CirrusProviderError(
+      "server_misconfigured",
+      "No Gemini model configured",
+      { status: 500 },
+    );
   }
 
   return {
