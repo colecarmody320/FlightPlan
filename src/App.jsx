@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { supabase } from "./supabase.js";
+const ALLOWED_EMAIL = "nicholasmcarmody@gmail.com";
 
 /* ============================================================
    FLIGHTPLAN v1.0
@@ -764,21 +765,45 @@ export default function CollegeHub() {
   const [openCourse, setOpenCourse] = useState(null);
   const first = useRef(true);
 
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user || null);
-      setAuthLoading(false);
-    });
+ useEffect(() => {
+  supabase.auth.getSession().then(async ({ data: { session } }) => {
+    const signedInUser = session?.user || null;
 
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user || null);
+    if (
+      signedInUser &&
+      signedInUser.email?.toLowerCase() !== ALLOWED_EMAIL.toLowerCase()
+    ) {
+      await supabase.auth.signOut();
+      setUser(null);
       setAuthLoading(false);
-    });
+      return;
+    }
 
-    return () => subscription.unsubscribe();
-  }, []);
+    setUser(signedInUser);
+    setAuthLoading(false);
+  });
+
+  const {
+    data: { subscription },
+  } = supabase.auth.onAuthStateChange(async (_event, session) => {
+    const signedInUser = session?.user || null;
+
+    if (
+      signedInUser &&
+      signedInUser.email?.toLowerCase() !== ALLOWED_EMAIL.toLowerCase()
+    ) {
+      await supabase.auth.signOut();
+      setUser(null);
+      setAuthLoading(false);
+      return;
+    }
+
+    setUser(signedInUser);
+    setAuthLoading(false);
+  });
+
+  return () => subscription.unsubscribe();
+}, []);
 
   useEffect(() => {
     if (!user) {
