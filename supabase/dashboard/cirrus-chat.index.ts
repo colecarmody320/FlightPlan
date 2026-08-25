@@ -273,6 +273,7 @@ function createGeminiProvider(rawApiKey: string, model: string): CirrusProvider 
         // metadata, never credentials or conversation content.
         let gStatus = "";
         let gReason = "";
+        let gMessage = "";
         try {
           const errBody = (await res.json()) as GeminiResponse;
           gStatus = errBody?.error?.status || "";
@@ -280,11 +281,33 @@ function createGeminiProvider(rawApiKey: string, model: string): CirrusProvider 
             (errBody?.error?.details || [])
               .map((d) => d?.reason)
               .find((r): r is string => Boolean(r)) || "";
+          // error.message is the only field that says *what* was wrong
+          // with a rejected payload ("Unknown name X: Cannot find
+          // field"). Google names the offending field, not its value.
+          gMessage = (errBody?.error?.message || "").slice(0, 300);
         } catch {
           /* body wasn't JSON — status alone is enough */
         }
-        const label = [gStatus, gReason].filter(Boolean).join(": ");
+        const label = [gStatus, gReason, gMessage].filter(Boolean).join(": ");
         const meta = { providerStatus: res.status, providerReason: gReason || gStatus };
+
+        // Shape of what we sent, so a rejected payload can be compared
+        // against the schema. Counts and field names only — no prompt
+        // text, no message text, no credentials.
+        console.log(
+          JSON.stringify({
+            event: "gemini_request_shape",
+            model,
+            bodyKeys: Object.keys(body),
+            contentsCount: contents.length,
+            firstRole: contents[0]?.role,
+            roles: contents.map((c) => c.role),
+            hasSystemInstruction: Boolean(req.systemPrompt),
+            systemPromptChars: req.systemPrompt.length,
+            messageChars: req.message.length,
+            generationConfig: body.generationConfig,
+          }),
+        );
 
         if (res.status === 429) {
           throw new CirrusProviderError(
