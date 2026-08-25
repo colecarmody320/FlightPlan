@@ -10,7 +10,9 @@ import { createGeminiProvider } from "./gemini.ts";
    ============================================================ */
 
 const DEFAULT_PROVIDER = "gemini";
-const DEFAULT_GEMINI_MODEL = "gemini-2.0-flash";
+// gemini-2.0-flash 404s against this project's key; 2.5-flash resolves.
+// Override per-environment with CIRRUS_MODEL.
+const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
 
 type ProviderFactory = () => CirrusProvider;
 

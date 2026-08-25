@@ -49,17 +49,28 @@ export class CirrusProviderError extends Error {
   status: number;
   /** True when a retry could plausibly succeed. */
   retryable: boolean;
+  /** Provider's own HTTP status, for logs. Never contains credentials. */
+  providerStatus?: number;
+  /** Provider's machine-readable reason, e.g. "API_KEY_INVALID". */
+  providerReason?: string;
 
   constructor(
     code: CirrusErrorCode,
     message: string,
-    opts: { status?: number; retryable?: boolean } = {},
+    opts: {
+      status?: number;
+      retryable?: boolean;
+      providerStatus?: number;
+      providerReason?: string;
+    } = {},
   ) {
     super(message);
     this.name = "CirrusProviderError";
     this.code = code;
     this.status = opts.status ?? 502;
     this.retryable = opts.retryable ?? false;
+    this.providerStatus = opts.providerStatus;
+    this.providerReason = opts.providerReason;
   }
 }
 

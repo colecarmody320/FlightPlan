@@ -249,7 +249,14 @@ Deno.serve(async (req: Request) => {
       log("provider_failure", {
         user: userTag(user.id),
         provider: provider.name,
+        model: provider.model,
         code: lastError.code,
+        // Provider's own status and machine-readable reason, e.g. 400 /
+        // API_KEY_INVALID. Structural metadata only — no credentials, no
+        // prompt or message content.
+        providerStatus: lastError.providerStatus,
+        providerReason: lastError.providerReason,
+        detail: lastError.message,
         attempt,
         willRetry,
         ms: Date.now() - started,

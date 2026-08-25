@@ -24,10 +24,19 @@ interface GeminiResponse {
     finishReason?: string;
   }>;
   promptFeedback?: { blockReason?: string };
-  error?: { message?: string; status?: string };
+  error?: {
+    message?: string;
+    status?: string;
+    details?: Array<{ reason?: string }>;
+  };
 }
 
-export function createGeminiProvider(apiKey: string, model: string): CirrusProvider {
+export function createGeminiProvider(rawApiKey: string, model: string): CirrusProvider {
+  // Secrets pasted through a dashboard commonly pick up a trailing
+  // newline or space. Google rejects those as API_KEY_INVALID, which
+  // surfaces as an opaque 400, so normalize before use.
+  const apiKey = (rawApiKey || "").trim();
+
   if (!apiKey) {
     throw new CirrusProviderError(
       "server_misconfigured",
@@ -41,9 +50,15 @@ export function createGeminiProvider(apiKey: string, model: string): CirrusProvi
     model,
 
     async generate(req: CirrusProviderRequest): Promise<CirrusProviderResult> {
+      // Gemini requires the first turn to be "user" and rejects a
+      // conversation that opens on a model turn. Trimming history to the
+      // most recent N can leave a leading assistant turn, so drop those.
+      const history = [...req.history];
+      while (history.length && history[0].role === "assistant") history.shift();
+
       // Gemini calls the assistant role "model".
       const contents = [
-        ...req.history.map((m) => ({
+        ...history.map((m) => ({
           role: m.role === "assistant" ? "model" : "user",
           parts: [{ text: m.content }],
         })),
@@ -92,42 +107,57 @@ export function createGeminiProvider(apiKey: string, model: string): CirrusProvi
       }
 
       if (!res.ok) {
-        // Read the provider's own message for diagnostics, but never
-        // echo raw provider payloads back to the client.
-        let detail = "";
+        // Google's status ("INVALID_ARGUMENT") is broad; the useful part
+        // is `details[].reason` ("API_KEY_INVALID"). Both are structural
+        // metadata, never credentials or conversation content.
+        let gStatus = "";
+        let gReason = "";
         try {
           const errBody = (await res.json()) as GeminiResponse;
-          detail = errBody?.error?.status || errBody?.error?.message || "";
+          gStatus = errBody?.error?.status || "";
+          gReason =
+            (errBody?.error?.details || [])
+              .map((d) => d?.reason)
+              .find((r): r is string => Boolean(r)) || "";
         } catch {
           /* body wasn't JSON — status alone is enough */
         }
+        const label = [gStatus, gReason].filter(Boolean).join(": ");
+        const meta = { providerStatus: res.status, providerReason: gReason || gStatus };
 
         if (res.status === 429) {
           throw new CirrusProviderError(
             "provider_rate_limited",
             "Gemini rate limit or quota exceeded",
-            { status: 429, retryable: true },
+            { status: 429, retryable: true, ...meta },
           );
         }
-        if (res.status === 401 || res.status === 403) {
-          // A bad/expired key is a server misconfiguration, not a user error.
+        // A rejected key arrives as 401/403, or as a 400 carrying
+        // API_KEY_INVALID. All three are configuration problems, not
+        // provider outages, and must not be retried.
+        const badKey =
+          res.status === 401 ||
+          res.status === 403 ||
+          gReason === "API_KEY_INVALID" ||
+          gReason === "API_KEY_SERVICE_BLOCKED";
+        if (badKey) {
           throw new CirrusProviderError(
             "server_misconfigured",
-            "Gemini rejected the configured credentials",
-            { status: 500, retryable: false },
+            `Gemini rejected the configured credentials (${label || res.status})`,
+            { status: 500, retryable: false, ...meta },
           );
         }
         if (res.status >= 500) {
           throw new CirrusProviderError(
             "provider_error",
             `Gemini returned ${res.status}`,
-            { status: 502, retryable: true },
+            { status: 502, retryable: true, ...meta },
           );
         }
         throw new CirrusProviderError(
           "provider_error",
-          `Gemini returned ${res.status}${detail ? ` (${detail})` : ""}`,
-          { status: 502, retryable: false },
+          `Gemini returned ${res.status}${label ? ` (${label})` : ""}`,
+          { status: 502, retryable: false, ...meta },
         );
       }
 
@@ -157,9 +187,14 @@ export function createGeminiProvider(apiKey: string, model: string): CirrusProvi
         .trim();
 
       if (!reply) {
+        // finishReason explains the common empty-reply causes (MAX_TOKENS
+        // on a thinking model, SAFETY, RECITATION) that would otherwise
+        // be indistinguishable.
         throw new CirrusProviderError(
           "malformed_provider_response",
-          "Gemini returned no usable text",
+          `Gemini returned no usable text${
+            candidate?.finishReason ? ` (finishReason: ${candidate.finishReason})` : ""
+          }`,
           { status: 502 },
         );
       }
