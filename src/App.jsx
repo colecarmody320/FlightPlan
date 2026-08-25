@@ -554,14 +554,17 @@ function daysSinceLastWorkout(workouts) {
 
 /* ---------- cabin lighting: the palette walks through the day ---------- */
 function cabinPhase(d = new Date()) {
-  const h = d.getHours();
-  if (h >= 5 && h < 11) return "dawn";
-  if (h >= 11 && h < 17) return "day";
-  if (h >= 21 || h < 5) return "night";
-  return "dusk";
+  const m = d.getHours() * 60 + d.getMinutes();
+  if (m < 240) return "night";        // 00:00–03:59
+  if (m < 390) return "predawn";      // 04:00–06:29
+  if (m < 660) return "dawn";         // 06:30–10:59
+  if (m < 1050) return "day";         // 11:00–17:29
+  if (m < 1260) return "dusk";        // 17:30–20:59
+  return "night";                     // 21:00–23:59
 }
 
 const CABIN = {
+  predawn: { lamp: "#D98F5A", ground: "#0B0E0C", g1: "rgba(217,143,90,.13)", g2: "rgba(74,68,104,.15)" },
   dawn:  { lamp: "#E8B36A", ground: "#11150F", g1: "rgba(232,179,106,.22)", g2: "rgba(201,148,92,.13)" },
   day:   { lamp: "#7FB2D4", ground: "#0D1411", g1: "rgba(127,178,212,.20)", g2: "rgba(62,142,99,.17)"  },
   dusk:  { lamp: "#C98A5C", ground: "#0A0F0C", g1: "rgba(201,138,92,.17)",  g2: "rgba(52,72,98,.18)"   },
@@ -892,48 +895,106 @@ function MetarStrip() {
 /* ---------- the greeting ---------- */
 const PILOT = "Cole";
 
+const BAND_TITLES = {
+  small: ["Still up", "Zero dark", "Late one", "Burning the tanks", "Past midnight", "Night shift"],
+  predawn: ["First call", "Early departure", "Up before the tower", "Pre-dawn", "Oh-dark-thirty", "First off the ramp"],
+  morning: ["Good morning", "Wheels up", "Clear and early", "Morning", "Chocks out", "Fresh tanks"],
+  midday: ["Midday", "Midfield", "Top of the climb", "Level off", "High noon", "Straight and level"],
+  afternoon: ["Good afternoon", "Cruise", "Long leg", "Afternoon", "Steady on", "Halfway home"],
+  evening: ["Good evening", "Golden hour", "Last light", "Evening", "Downwind", "Sun's going"],
+  night: ["Night shift", "After hours", "Beacon's on", "Good evening", "Last call", "Field's quiet"],
+};
+
 const GREETINGS = {
+  small: [
+    "Red light in the cockpit. Easy on the eyes.",
+    "The hangar's empty except for you.",
+    "Nothing on the frequency but you.",
+    "Fatigue is a hazard. Know when to call it.",
+    "Rest is on the checklist too, Cole.",
+    "Stars are out. Good night for navigation.",
+    "Whatever this is, it'll still be here at eight.",
+    "The tower's been closed for hours.",
+    "Set the parking brake when you're done.",
+    "Nobody logs their best hours at 2am.",
+    "Duty day's been over a while now.",
+    "Ramp's dark. Go get horizontal.",
+    "This is the part of the night that costs you tomorrow.",
+    "Even the freight dogs are on the ground by now.",
+  ],
+  predawn: [
+    "Nobody else is moving yet.",
+    "Coffee first. Checklist second.",
+    "The ramp's cold and the sky isn't up yet.",
+    "Early enough that the air is still smooth.",
+    "First light's an hour out.",
+    "Beat the tower to work.",
+    "Quiet frequency, empty pattern.",
+    "Dew on the wings.",
+    "You've got the whole field to yourself.",
+    "Preflight in the dark builds character.",
+    "The sun's still somewhere over the Atlantic.",
+    "Early departures make easy afternoons.",
+  ],
   morning: [
     "Preflight's done. The day's yours.",
     "Winds are calm and the field is quiet.",
-    "First light. The ramp's still cold.",
-    "Coffee, then checklists.",
     "Clear skies on the forecast — take the early slot.",
     "Engine's warm. Let's get moving.",
     "Nothing's due yet. That's a rare thing.",
-    "Sun's coming up over the hangar.",
+    "Sun's up over the hangar.",
     "You're first on the taxiway today.",
-    "Early departures make easy afternoons.",
     "Fresh sectional, fresh start.",
-    "Good morning. Nothing on the frequency yet.",
+    "Good air this time of morning.",
+    "Runway's yours. No one holding short.",
+    "The hard stuff goes best before noon.",
+    "Full tanks, full day.",
+    "Nothing on the ATIS but good news.",
+    "Best hour of the day for a lesson.",
   ],
-  afternoon: [
+  midday: [
     "Straight and level.",
     "Halfway down the runway — keep it rolling.",
     "Ceiling and visibility unlimited.",
-    "Cruise altitude. Hold the heading.",
     "Thermals are picking up. So should you.",
     "Trim it out and settle in.",
     "Midfield downwind. Plenty of day left.",
+    "Sun's overhead. No excuses.",
     "Fuel's good, time's good, keep going.",
+    "Level at cruise. Hold what you've got.",
+    "Bumpy this time of day. Push through it.",
+    "Lunch counts as a rest, not a stop.",
+    "The middle of the day is where it's won.",
+  ],
+  afternoon: [
+    "Cruise altitude. Hold the heading.",
     "The hard part of the day is behind you.",
-    "Hold what you've got.",
     "Steady on the yoke.",
-    "Good afternoon. Traffic's light.",
+    "Traffic's light. Good time to work.",
+    "Long leg. Settle in for it.",
+    "Still plenty of daylight to burn.",
+    "Second wind is a real thing. Go find it.",
+    "Winds aloft are in your favor.",
+    "Nothing wrong with a slow cruise.",
+    "You're past the halfway point. Finish it.",
+    "Afternoon's for the stuff you've been avoiding.",
+    "Hold this heading a while longer.",
   ],
   evening: [
     "Sun's low. Good light for a landing.",
     "Downwind, gear coming down.",
-    "Evening. Time for the second pass.",
     "One more circuit before you shut it down.",
     "Golden hour over the field.",
-    "Runway lights are on.",
+    "Runway lights just came on.",
     "Last leg of the day.",
     "Wind's died down. Smoothest air you'll get.",
     "Short final. Bring it in easy.",
     "Chocks aren't in yet — one more.",
     "The evening flights are always the good ones.",
     "Log the hours before you forget them.",
+    "Best air of the day is right now.",
+    "Sunset's doing the work for you.",
+    "Time for the second pass.",
   ],
   night: [
     "Night currency counts too.",
@@ -941,30 +1002,31 @@ const GREETINGS = {
     "The field's dark and you're still at it.",
     "Nav lights only. Take it easy.",
     "Three takeoffs, three landings, one hour past sunset.",
-    "Red light in the cockpit. Easy on the eyes.",
     "Quiet frequency this time of night.",
-    "The hangar's empty except for you.",
-    "Rest is part of the checklist too, Cole.",
-    "Fatigue is a hazard. Know when to call it.",
-    "Stars are out. Good night for navigation.",
-    "Set the parking brake when you're done.",
+    "Cool air, clear sky, empty pattern.",
+    "Good night for a cross-country.",
+    "Instruments glowing, world gone quiet.",
+    "Get it done and get some sleep.",
+    "One more hour, then chocks in.",
+    "The night shift gets the smooth air.",
+    "Nothing left on the schedule but you.",
+    "Wrap it up before it turns into tomorrow.",
   ],
 };
 
 function timeBand() {
-  const h = new Date().getHours();
-  if (h < 12) return "morning";
-  if (h < 17) return "afternoon";
-  if (h < 21) return "evening";
-  return "night";
+  const d = new Date();
+  const m = d.getHours() * 60 + d.getMinutes();
+  if (m < 240) return "small";        // 00:00–03:59
+  if (m < 390) return "predawn";      // 04:00–06:29
+  if (m < 660) return "morning";      // 06:30–10:59
+  if (m < 840) return "midday";       // 11:00–13:59
+  if (m < 1050) return "afternoon";   // 14:00–17:29
+  if (m < 1260) return "evening";     // 17:30–20:59
+  return "night";                     // 21:00–23:59
 }
 
-const BAND_TITLE = {
-  morning: "Good morning",
-  afternoon: "Good afternoon",
-  evening: "Good evening",
-  night: "Still up",
-};
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
 function statusStrip(data) {
   const now = new Date();
@@ -990,10 +1052,8 @@ function statusStrip(data) {
 
 function Greeting({ data, go }) {
   const band = timeBand();
-  const line = useMemo(() => {
-    const pool = GREETINGS[band];
-    return pool[Math.floor(Math.random() * pool.length)];
-  }, [band]);
+  const line = useMemo(() => pick(GREETINGS[band]), [band]);
+  const title = useMemo(() => pick(BAND_TITLES[band]), [band]);
 
   const graded = live(data).map((c) => courseGrade(c).current).filter((x) => x !== null);
   const gpa = graded.length
@@ -1027,7 +1087,7 @@ function Greeting({ data, go }) {
       </p>
 
       <h1 className="hero-h hero" style={{ marginTop: 14 }}>
-        {BAND_TITLE[band]}, <em>{PILOT}</em>.
+        {title}, <em>{PILOT}</em>.
       </h1>
 
       <p style={S.heroSub} className="hero-2">{line}</p>
