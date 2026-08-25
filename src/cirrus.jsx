@@ -102,8 +102,8 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject }
 
   const sendDraft = (e) => {
     e.preventDefault();
-    if (!draft.trim()) return;
-    conversation.addMessage("user", draft);
+    if (!draft.trim() || conversation.sending) return;
+    conversation.send(draft);
     setDraft("");
   };
 
@@ -189,10 +189,11 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject }
                 ) : (
                   <>
                     <div className="cirrus-chat-log">
-                      <p className="cirrus-note">
-                        Not connected to a reasoning provider yet — messages you send stay on
-                        this device for this session only, and Cirrus won't reply.
-                      </p>
+                      {conversation.messages.length === 0 && !conversation.error && (
+                        <p className="cirrus-note">
+                          This conversation stays on this device and isn't saved.
+                        </p>
+                      )}
                       {conversation.messages.length > 0 && (
                         <div className="cirrus-log-list">
                           {conversation.messages.map((m) => (
@@ -201,6 +202,16 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject }
                             </p>
                           ))}
                         </div>
+                      )}
+                      {conversation.sending && (
+                        <p className="cirrus-note" aria-live="polite">
+                          Thinking…
+                        </p>
+                      )}
+                      {conversation.error && (
+                        <p className="cirrus-error" role="status">
+                          {conversation.error.message}
+                        </p>
                       )}
                     </div>
 
@@ -215,12 +226,17 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject }
                     <form className="cirrus-chat-input" onSubmit={sendDraft}>
                       <input
                         type="text"
-                        placeholder="Talk to Cirrus…"
+                        placeholder={conversation.sending ? "Waiting for Cirrus…" : "Talk to Cirrus…"}
                         aria-label="Message Cirrus"
                         value={draft}
+                        disabled={conversation.sending}
                         onChange={(e) => setDraft(e.target.value)}
                       />
-                      <button type="submit" className="btn" disabled={!draft.trim()}>
+                      <button
+                        type="submit"
+                        className="btn"
+                        disabled={!draft.trim() || conversation.sending}
+                      >
                         Send
                       </button>
                     </form>
@@ -355,11 +371,27 @@ export const CIRRUS_CSS = `
   .cirrus-chat-log { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; }
   .cirrus-log-list { display: flex; flex-direction: column; gap: 6px; }
   .cirrus-log-msg {
-    margin: 0; align-self: flex-end; max-width: 88%;
-    background: rgba(62,142,99,.14); color: var(--bone);
-    font-size: 13px; line-height: 1.4;
-    padding: 8px 11px; border-radius: 12px 12px 2px 12px;
+    margin: 0; max-width: 88%;
+    font-size: 13px; line-height: 1.45;
+    padding: 8px 11px;
     white-space: pre-wrap; word-break: break-word;
+  }
+  .cirrus-log-msg.user {
+    align-self: flex-end;
+    background: rgba(62,142,99,.14); color: var(--bone);
+    border-radius: 12px 12px 2px 12px;
+  }
+  .cirrus-log-msg.assistant {
+    align-self: flex-start;
+    background: var(--surface); color: var(--bone);
+    border: 1px solid var(--line);
+    border-radius: 12px 12px 12px 2px;
+  }
+  .cirrus-error {
+    margin: 0; font-size: 12px; line-height: 1.5;
+    color: var(--alert);
+    border-left: 2px solid var(--alert);
+    padding-left: 9px;
   }
 
   .cirrus-suggestions { display: flex; flex-wrap: wrap; gap: 6px; flex: none; }

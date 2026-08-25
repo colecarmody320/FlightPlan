@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CIRRUS_MODES, WAVEFORM_STATES } from "./cirrusShared.js";
 import { CIRRUS_TASK_MODES } from "./cirrusPersonality.js";
+import { sendCirrusMessage } from "./cirrusService.js";
 
 /* ============================================================
    CIRRUS — conversation state architecture
@@ -45,6 +46,10 @@ function blankConversation({ mode, page } = {}) {
     mode: mode || CIRRUS_MODES.OFF,
     taskMode: CIRRUS_TASK_MODES.NORMAL,
     voiceState: WAVEFORM_STATES.READY,
+    // Transport state for an in-flight turn. Ephemeral like the rest
+    // of this object — never persisted.
+    sending: false,
+    error: null,
   };
 }
 
@@ -58,6 +63,13 @@ function blankConversation({ mode, page } = {}) {
  */
 export function useCirrusConversation({ mode, page, selectedObject } = {}) {
   const [state, setState] = useState(() => blankConversation({ mode, page }));
+
+  // Mirrors state so send() can read the current transcript/context
+  // without re-creating itself on every keystroke-driven render.
+  const stateRef = useRef(state);
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
 
   useEffect(() => {
     setState((s) => (s.mode === mode ? s : { ...s, mode }));
@@ -101,6 +113,72 @@ export function useCirrusConversation({ mode, page, selectedObject } = {}) {
     setState((s) => ({ ...s, voiceState }));
   }, []);
 
+  const clearError = useCallback(() => {
+    setState((s) => (s.error === null ? s : { ...s, error: null }));
+  }, []);
+
+  /**
+   * One conversational turn: append the user's message, ask the
+   * backend, append the reply or record the error. The reply is text
+   * that gets displayed — it is never interpreted, and no branch here
+   * writes to application data.
+   */
+  const send = useCallback(
+    async (text) => {
+      const trimmed = (text || "").trim();
+      if (!trimmed) return;
+
+      const snapshot = stateRef.current;
+      if (snapshot.sending) return; // one in-flight turn at a time
+      // OFF means zero requests — enforced here as well as in the
+      // service, so no call path can reach the network while off.
+      if (!snapshot.mode || snapshot.mode === CIRRUS_MODES.OFF) return;
+
+      // History as it stood *before* this message; the new message is
+      // sent separately as `message`.
+      const history = snapshot.messages.map((m) => ({ role: m.role, content: m.content }));
+
+      addMessage("user", trimmed);
+      setState((s) => ({
+        ...s,
+        sending: true,
+        error: null,
+        voiceState: WAVEFORM_STATES.THINKING,
+      }));
+
+      const result = await sendCirrusMessage({
+        message: trimmed,
+        history,
+        mode: snapshot.mode,
+        page: snapshot.page,
+        selectedObject: snapshot.selectedObject,
+        activeTopic: snapshot.activeTopic,
+        taskMode: snapshot.taskMode,
+      });
+
+      if (result.ok) {
+        addMessage("assistant", result.reply);
+        setState((s) => ({
+          ...s,
+          sending: false,
+          error: null,
+          voiceState: WAVEFORM_STATES.READY,
+        }));
+        return;
+      }
+
+      // A failure leaves the transcript and every byte of application
+      // data exactly as it was. The user's message stays on screen.
+      setState((s) => ({
+        ...s,
+        sending: false,
+        error: { code: result.code, message: result.message },
+        voiceState: WAVEFORM_STATES.READY,
+      }));
+    },
+    [addMessage]
+  );
+
   // Clears the transcript/topic/pending action but keeps mode/page/
   // selection, since those are still externally true.
   const clear = useCallback(() => {
@@ -119,8 +197,21 @@ export function useCirrusConversation({ mode, page, selectedObject } = {}) {
       setUnresolvedReferences,
       setPendingAction,
       setVoiceState,
+      clearError,
+      send,
       clear,
     }),
-    [state, addMessage, setTaskMode, setActiveTopic, setUnresolvedReferences, setPendingAction, setVoiceState, clear]
+    [
+      state,
+      addMessage,
+      setTaskMode,
+      setActiveTopic,
+      setUnresolvedReferences,
+      setPendingAction,
+      setVoiceState,
+      clearError,
+      send,
+      clear,
+    ]
   );
 }

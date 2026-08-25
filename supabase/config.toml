@@ -1,0 +1,7 @@
+project_id = "pqamqgxqftxxnzbqcgxq"
+
+[functions.cirrus-chat]
+# Gateway-level JWT check. The function additionally verifies the caller
+# with auth.getUser(), because the anon key alone is a valid JWT and
+# would otherwise pass this gate.
+verify_jwt = true
