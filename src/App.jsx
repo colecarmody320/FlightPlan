@@ -921,7 +921,7 @@ export default function CollegeHub() {
         <span className="mark">✈</span>
         <span style={S.wordmark}>FlightPlan</span>
 
-        <div style={S.navWrap}>
+        <div className="nav">
           {[
             ["home", "Home"],
             ["cards", "Cards"],
@@ -946,7 +946,7 @@ export default function CollegeHub() {
 
         <button
           style={S.btn}
-          className="btn cta"
+       className="btn cta cta-desktop"
           onClick={() => {
             setTab("cards");
             setOpenCourse(null);
@@ -963,7 +963,7 @@ export default function CollegeHub() {
 </button>
       </header>
 
-      <main>
+      <main key={tab} className="view">
         {tab === "home" && <Home data={data} go={setTab} />}
         {tab === "cards" && <CardsTab data={data} update={update} />}
         {tab === "study" && <StudyTab data={data} update={update} />}
@@ -1737,15 +1737,14 @@ function Review({ data, update, scope, done }) {
       <div style={S.card}>
         {card.front && <p style={{ fontSize: 18 }}>{card.front}</p>}
         {card.frontImg && <img src={card.frontImg} alt="" style={S.cardImg} />}
-        {revealed ? (
-          <>
+        {revealed ? (            
+          <div className="flip">
             <hr />
             {card.back && <pre style={S.pre}>{card.back}</pre>}
             {card.backImg && <img src={card.backImg} alt="" style={S.cardImg} />}
             <button style={S.btn} className="btn" onClick={() => grade(false)}>Missed it</button>
             <button style={S.btn} className="btn" onClick={() => grade(true)}>Got it</button>
-          </>
-        ) : (
+          </div>
           <button style={S.btn} className="btn" onClick={() => setRevealed(true)}>Show answer</button>
         )}
       </div>
@@ -3438,14 +3437,12 @@ const CSS = `
 
   /* sticky product bar */
   .hub .bar {
-    position: sticky; top: 0; z-index: 20;
     display: flex; align-items: center; gap: 18px;
-    padding: 12px 0 12px;
+    padding: 14px 0;
     margin-bottom: 8px;
-    background: rgba(13,20,17,.82);
-    backdrop-filter: blur(12px);
     border-bottom: 1px solid var(--line);
   }
+
   .hub .mark {
     display: inline-flex; align-items: center; justify-content: center;
     width: 34px; height: 34px; flex: none;
@@ -3559,13 +3556,92 @@ const CSS = `
     .hub .tiles { grid-template-columns: repeat(3, 1fr); }
   }
 
+  /* nav scrolls sideways instead of wrapping into a pile */
+  .hub .nav {
+    display: flex; align-items: center; gap: 2px;
+    flex: 1; min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .hub .nav::-webkit-scrollbar { display: none; }
+  .hub .nav .tab { flex: none; white-space: nowrap; }
+
+  /* view swaps in when you change tabs */
+  .hub .view { animation: viewIn .34s cubic-bezier(.22,.61,.36,1) both; }
+  @keyframes viewIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: none; }
+  }
+
+  /* panels stagger in underneath it */
+  .hub .panel { animation: panelIn .5s cubic-bezier(.22,.61,.36,1) both; }
+  .hub .panel:nth-child(1) { animation-delay: .04s; }
+  .hub .panel:nth-child(2) { animation-delay: .10s; }
+  .hub .panel:nth-child(3) { animation-delay: .16s; }
+  .hub .panel:nth-child(4) { animation-delay: .22s; }
+  .hub .panel:nth-child(5) { animation-delay: .28s; }
+  .hub .panel:nth-child(n+6) { animation-delay: .32s; }
+  @keyframes panelIn {
+    from { opacity: 0; transform: translateY(16px); }
+    to { opacity: 1; transform: none; }
+  }
+  .hub .panel:hover { border-color: var(--edge); }
+
+  /* answer flips up when revealed */
+  .hub .flip { animation: flipIn .4s cubic-bezier(.22,.61,.36,1) both; transform-origin: top center; }
+  @keyframes flipIn {
+    from { opacity: 0; transform: perspective(700px) rotateX(-32deg); }
+    to { opacity: 1; transform: none; }
+  }
+
+  .hub tbody tr { transition: background .15s ease; }
+  .hub tbody tr:hover { background: rgba(62,142,99,.06); }
+
+  .hub .mark { transition: transform .3s cubic-bezier(.22,.61,.36,1); }
+  .hub .bar:hover .mark { transform: translateX(3px) rotate(-10deg); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .hub .hero, .hub .hero-2, .hub .hero-3,
+    .hub .view, .hub .panel, .hub .flip { animation: none; }
+    .hub .gauge span, .hub .tile { transition: none; }
+  }
+
+  @media (max-width: 940px) {
+    .hub .tiles { grid-template-columns: repeat(3, 1fr); }
+  }
+
   @media (max-width: 720px) {
+    .hub { padding-left: 14px !important; padding-right: 14px !important; }
+
+    .hub .bar { gap: 10px; padding: 12px 0; }
+    .hub .cta-desktop { display: none; }
+
     .hub .tiles { grid-template-columns: repeat(2, 1fr); gap: 10px; }
     .hub .tile { padding: 12px; }
-    .hub .bar { flex-wrap: wrap; gap: 8px; }
     .hub .tab { font-size: 13px; padding: 6px 9px; }
+
+    /* wide tables scroll instead of blowing out the page */
+    .hub table {
+      display: block;
+      overflow-x: auto;
+      white-space: nowrap;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    /* inputs stop overflowing — checkboxes excluded */
+    .hub input:not([type="checkbox"]):not([type="file"]),
+    .hub select,
+    .hub textarea {
+      width: 100% !important;
+      min-width: 0 !important;
+      margin-right: 0 !important;
+    }
+
+    .hub section { padding: 14px 14px 16px !important; }
+    .hub .panel { border-radius: 14px; }
   }
 `;
+
 
 const BODY = "'Inter', system-ui, -apple-system, sans-serif";
 const MONO = "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace";
