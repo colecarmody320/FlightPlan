@@ -3,13 +3,17 @@ import React, { useState, useRef, useEffect } from "react";
 /* ============================================================
    CIRRUS — personal assistant layer
    Self-contained, like aviation.jsx. Inherits the .hub palette and
-   cabin lighting via CSS variables. This module is scaffolding only:
-   mode state + the waveform indicator + the dock UI. No provider
-   calls (Gemini/ElevenLabs/Calendar) are wired in yet — those land
-   in later phases behind the allowlisted-action/permission gate
-   described in the project brief. FlightPlan must work identically
-   with this module removed entirely; nothing here touches app data
-   outside the `cirrus` key.
+   cabin lighting via CSS variables. Stage 1 is UI/state architecture
+   only: mode persistence, the waveform indicator, the header control,
+   the side-panel/bottom-sheet, and the Home strip. No provider calls
+   (Gemini/ElevenLabs/Calendar) are wired in yet — those land in later
+   stages behind the allowlisted-action/permission gate described in
+   the project brief. FlightPlan must work identically with this
+   module removed entirely; nothing here touches app data outside the
+   `cirrus` key, and panel visibility is deliberately NOT persisted —
+   it's ephemeral UI, kept separate from any future voice-session
+   state (listening/thinking/speaking), which later stages will add
+   without needing to touch open/collapsed at all.
    ============================================================ */
 
 export const CIRRUS_MODES = {
@@ -40,7 +44,8 @@ export function blankCirrus() {
 }
 
 // Additive only — an older or partial `data.cirrus` (or none at all)
-// still resolves to a valid, safe-default state.
+// still resolves to a valid, safe-default state. Never replaces
+// anything else on `data`.
 export function migrateCirrus(d) {
   return { cirrus: { ...blankCirrus(), ...(d?.cirrus || {}) } };
 }
@@ -78,44 +83,43 @@ export function Waveform({ state = WAVEFORM_STATES.READY, size = 20 }) {
 }
 
 /* ============================================================
-   DOCK
-   Header control. OFF renders a single faint icon button and
-   nothing else — "nearly invisible." Any other mode adds the
-   waveform + an expandable panel with the mode switch and a
-   conversation shell (not yet wired to a provider).
+   HEADER CONTROL + PANEL
+   `open`/`setOpen` are owned by the caller (CollegeHub) so the
+   keyboard shortcut and the Home strip can reach the same state.
    ============================================================ */
-export function CirrusDock({ data, update }) {
+export function CirrusDock({ data, update, open, setOpen }) {
   const mode = data?.cirrus?.mode || CIRRUS_MODES.OFF;
-  const [open, setOpen] = useState(false);
-  const ref = useRef(null);
+  const [collapsed, setCollapsed] = useState(false);
+  const panelRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) setCollapsed(false);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
-    const onClick = (e) => {
-      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
-    };
     const onKey = (e) => {
       if (e.key === "Escape") setOpen(false);
     };
-    document.addEventListener("mousedown", onClick);
     document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onClick);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [open, setOpen]);
 
   const setMode = (m) =>
     update((d) => ({ ...d, cirrus: { ...(d.cirrus || blankCirrus()), mode: m } }));
 
+  const statusLabel = mode === CIRRUS_MODES.OFF ? "off" : "ready";
+
   return (
-    <div className="cirrus-dock" ref={ref}>
+    <>
       <button
         type="button"
-        className={mode === CIRRUS_MODES.OFF ? "cirrus-toggle off" : "cirrus-toggle"}
+        className={
+          mode === CIRRUS_MODES.OFF ? "cirrus-toggle off" : open ? "cirrus-toggle on" : "cirrus-toggle"
+        }
         onClick={() => setOpen((v) => !v)}
-        title="Cirrus"
-        aria-label={`Cirrus — ${MODE_LABEL[mode]}`}
+        title="Cirrus (⌘J / Ctrl+J)"
+        aria-label={`Cirrus — ${MODE_LABEL[mode]}${open ? ", open" : ""}`}
         aria-expanded={open}
       >
         {mode === CIRRUS_MODES.OFF ? (
@@ -126,66 +130,131 @@ export function CirrusDock({ data, update }) {
       </button>
 
       {open && (
-        <div className="cirrus-panel" role="dialog" aria-label="Cirrus settings">
-          <div className="cirrus-panel-head">
-            <Waveform state={WAVEFORM_STATES.READY} size={18} />
-            <span className="cirrus-title">Cirrus</span>
-          </div>
-
-          <div className="cirrus-modes" role="radiogroup" aria-label="Cirrus mode">
-            {MODE_ORDER.map((m) => (
+        <>
+          <div className="cirrus-scrim" onClick={() => setOpen(false)} aria-hidden="true" />
+          <div
+            ref={panelRef}
+            className={collapsed ? "cirrus-panel collapsed" : "cirrus-panel"}
+            role="dialog"
+            aria-label="Cirrus"
+          >
+            <div className="cirrus-panel-head">
+              <Waveform state={WAVEFORM_STATES.READY} size={18} />
+              <div className="cirrus-head-text">
+                <span className="cirrus-title">Cirrus</span>
+                <span className="cirrus-status">
+                  {MODE_LABEL[mode]} &middot; {statusLabel}
+                </span>
+              </div>
               <button
-                key={m}
                 type="button"
-                role="radio"
-                aria-checked={mode === m}
-                className={mode === m ? "cirrus-mode on" : "cirrus-mode"}
-                onClick={() => setMode(m)}
+                className="cirrus-icon-btn"
+                onClick={() => setCollapsed((v) => !v)}
+                title={collapsed ? "Expand" : "Collapse"}
+                aria-label={collapsed ? "Expand Cirrus panel" : "Collapse Cirrus panel"}
               >
-                {MODE_LABEL[m]}
+                {collapsed ? "▾" : "▴"}
               </button>
-            ))}
-          </div>
-
-          {mode === CIRRUS_MODES.OFF && (
-            <p className="cirrus-note">
-              Off. No model calls, no microphone, no proactive activity.
-            </p>
-          )}
-
-          {mode !== CIRRUS_MODES.OFF && (
-            <div className="cirrus-chat">
-              <div className="cirrus-chat-log">
-                <p className="cirrus-note">
-                  Not connected to a reasoning provider yet — this is the interface
-                  shell for {MODE_LABEL[mode].toLowerCase()} mode.
-                </p>
-              </div>
-              <div className="cirrus-chat-input">
-                <input
-                  type="text"
-                  placeholder="Talk to Cirrus…"
-                  disabled
-                  aria-label="Message Cirrus"
-                />
-                <button type="button" className="btn" disabled>
-                  Send
-                </button>
-              </div>
-              {mode === CIRRUS_MODES.COMPANION && (
-                <p className="cirrus-note dim">Voice starts from a deliberate action here — not yet wired.</p>
-              )}
+              <button
+                type="button"
+                className="cirrus-icon-btn"
+                onClick={() => setOpen(false)}
+                title="Close"
+                aria-label="Close Cirrus"
+              >
+                ✕
+              </button>
             </div>
-          )}
-        </div>
+
+            {!collapsed && (
+              <div className="cirrus-body">
+                <div className="cirrus-modes" role="radiogroup" aria-label="Cirrus mode">
+                  {MODE_ORDER.map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      role="radio"
+                      aria-checked={mode === m}
+                      className={mode === m ? "cirrus-mode on" : "cirrus-mode"}
+                      onClick={() => setMode(m)}
+                    >
+                      {MODE_LABEL[m]}
+                    </button>
+                  ))}
+                </div>
+
+                {mode === CIRRUS_MODES.OFF ? (
+                  <p className="cirrus-note">
+                    Off. No model calls, no microphone, no proactive activity.
+                  </p>
+                ) : (
+                  <>
+                    <div className="cirrus-chat-log">
+                      <p className="cirrus-note">
+                        Not connected to a reasoning provider yet — this is the interface
+                        shell for {MODE_LABEL[mode].toLowerCase()} mode.
+                      </p>
+                    </div>
+
+                    <div className="cirrus-suggestions" aria-label="Suggestions">
+                      {["Today's mission", "What's due", "Weekly pace"].map((s) => (
+                        <button key={s} type="button" className="cirrus-chip" disabled>
+                          {s}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="cirrus-chat-input">
+                      <input type="text" placeholder="Talk to Cirrus…" disabled aria-label="Message Cirrus" />
+                      <button type="button" className="btn" disabled>
+                        Send
+                      </button>
+                    </div>
+
+                    {mode === CIRRUS_MODES.COMPANION && (
+                      <p className="cirrus-note dim">
+                        Voice starts from a deliberate action here — not yet wired.
+                      </p>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        </>
       )}
-    </div>
+    </>
+  );
+}
+
+/* ============================================================
+   HOME STRIP
+   Reflects Cirrus's own mode/status only — no fabricated insights.
+   ============================================================ */
+export function CirrusHomeStrip({ data, openPanel }) {
+  const mode = data?.cirrus?.mode || CIRRUS_MODES.OFF;
+
+  if (mode === CIRRUS_MODES.OFF) {
+    return (
+      <button type="button" className="cirrus-strip off" onClick={openPanel}>
+        <span className="cirrus-dot" aria-hidden="true" />
+        <span>Cirrus is off</span>
+      </button>
+    );
+  }
+
+  return (
+    <button type="button" className="cirrus-strip" onClick={openPanel}>
+      <Waveform state={WAVEFORM_STATES.READY} size={14} />
+      <span>
+        Cirrus &middot; {MODE_LABEL[mode]} &middot; ready
+      </span>
+      <span className="cirrus-strip-hint">⌘J</span>
+    </button>
   );
 }
 
 export const CIRRUS_CSS = `
-  .cirrus-dock { position: relative; flex: none; }
-
   .cirrus-toggle {
     display: inline-flex; align-items: center; justify-content: center;
     width: 34px; height: 34px;
@@ -196,6 +265,7 @@ export const CIRRUS_CSS = `
     transition: border-color .15s ease, background .15s ease;
   }
   .cirrus-toggle:hover { border-color: var(--lamp); background: rgba(127,178,212,.12); }
+  .cirrus-toggle.on { border-color: var(--green-bright); background: rgba(62,142,99,.14); }
   .cirrus-toggle.off {
     border-color: transparent;
     background: none;
@@ -208,19 +278,54 @@ export const CIRRUS_CSS = `
     background: var(--faint);
   }
 
-  .cirrus-panel {
-    position: absolute; right: 0; top: calc(100% + 8px);
-    width: 280px; z-index: 20;
-    background: var(--raised);
-    border: 1px solid var(--line);
-    border-radius: 14px;
-    padding: 14px;
-    box-shadow: 0 12px 32px rgba(0,0,0,.35);
+  /* scrim: inert on desktop (non-modal side panel), dismissible on mobile */
+  .cirrus-scrim {
+    position: fixed; inset: 0; z-index: 45;
+    background: transparent; pointer-events: none;
   }
-  .cirrus-panel-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-  .cirrus-title { font-weight: 600; color: var(--bone); font-size: 14px; }
 
-  .cirrus-modes { display: flex; gap: 4px; padding: 3px; background: var(--surface); border-radius: 10px; margin-bottom: 10px; }
+  .cirrus-panel {
+    position: fixed; top: 62px; right: 0; bottom: 0;
+    width: min(400px, 92vw);
+    z-index: 46;
+    display: flex; flex-direction: column;
+    background: var(--raised);
+    border-left: 1px solid var(--line);
+    box-shadow: -12px 0 32px rgba(0,0,0,.35);
+    animation: cirrusSlideIn .22s cubic-bezier(.22,.61,.36,1) both;
+  }
+  .cirrus-panel.collapsed { bottom: auto; box-shadow: -12px 12px 32px rgba(0,0,0,.3); }
+  @keyframes cirrusSlideIn {
+    from { transform: translateX(24px); opacity: 0; }
+    to { transform: none; opacity: 1; }
+  }
+
+  .cirrus-panel-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 12px 14px 16px;
+    border-bottom: 1px solid var(--line);
+    flex: none;
+  }
+  .cirrus-head-text { display: flex; flex-direction: column; margin-right: auto; min-width: 0; }
+  .cirrus-title { font-weight: 600; color: var(--bone); font-size: 14px; }
+  .cirrus-status { font-size: 11px; color: var(--faint); text-transform: capitalize; }
+
+  .cirrus-icon-btn {
+    flex: none; width: 26px; height: 26px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: none; background: none; color: var(--muted);
+    border-radius: 7px; cursor: pointer; font-size: 12px;
+    transition: color .15s ease, background .15s ease;
+  }
+  .cirrus-icon-btn:hover { color: var(--bone); background: rgba(255,255,255,.06); }
+
+  .cirrus-body {
+    flex: 1; min-height: 0; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 12px;
+    padding: 14px 16px 16px;
+  }
+
+  .cirrus-modes { display: flex; gap: 4px; padding: 3px; background: var(--surface); border-radius: 10px; flex: none; }
   .cirrus-mode {
     flex: 1; border: none; background: none; color: var(--muted);
     font-family: 'Inter', system-ui, sans-serif; font-size: 12.5px; font-weight: 500;
@@ -231,14 +336,44 @@ export const CIRRUS_CSS = `
   .cirrus-mode.on { color: var(--green-bright); background: rgba(62,142,99,.16); }
 
   .cirrus-note { font-size: 12px; color: var(--faint); line-height: 1.5; margin: 0; }
-  .cirrus-note.dim { margin-top: 8px; opacity: .8; }
+  .cirrus-note.dim { opacity: .8; }
 
-  .cirrus-chat-log { margin-bottom: 10px; }
-  .cirrus-chat-input { display: flex; gap: 6px; }
+  .cirrus-chat-log { flex: 1; min-height: 0; }
+
+  .cirrus-suggestions { display: flex; flex-wrap: wrap; gap: 6px; flex: none; }
+  .cirrus-chip {
+    border: 1px solid var(--edge); background: var(--surface); color: var(--muted);
+    font-family: 'Inter', system-ui, sans-serif; font-size: 11.5px;
+    padding: 6px 10px; border-radius: 999px; cursor: not-allowed;
+  }
+
+  .cirrus-chat-input { display: flex; gap: 6px; flex: none; }
   .cirrus-chat-input input {
     flex: 1; min-width: 0; padding: 8px 10px; font-size: 13px; border-radius: 8px;
   }
   .cirrus-chat-input .btn { padding: 8px 14px; font-size: 13px; }
+
+  /* Home strip */
+  .cirrus-strip {
+    display: flex; align-items: center; gap: 10px;
+    width: 100%; text-align: left;
+    padding: 10px 14px;
+    margin-bottom: 22px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: rgba(62,142,99,.05);
+    color: var(--muted);
+    font-family: 'Inter', system-ui, sans-serif;
+    font-size: 13px;
+    cursor: pointer;
+    transition: border-color .15s ease, background .15s ease;
+  }
+  .cirrus-strip:hover { border-color: var(--edge); background: rgba(62,142,99,.09); }
+  .cirrus-strip.off { color: var(--faint); background: transparent; }
+  .cirrus-strip-hint {
+    margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 10px;
+    color: var(--faint); letter-spacing: .05em;
+  }
 
   /* waveform */
   .cirrus-bar { fill: var(--muted); transform-origin: 30px 12px; }
@@ -259,4 +394,25 @@ export const CIRRUS_CSS = `
 
   .cirrus-wave-approval .cirrus-bar { fill: var(--alert); animation: cirrusBreathe 1.1s ease-in-out infinite; }
   .cirrus-wave-paused .cirrus-bar { fill: var(--faint); animation: none; opacity: .4; transform: scaleY(.6); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .cirrus-panel { animation: none; }
+    .cirrus-bar { animation: none !important; }
+  }
+
+  @media (max-width: 720px) {
+    .cirrus-scrim { background: rgba(0,0,0,.45); pointer-events: auto; }
+    .cirrus-panel {
+      left: 0; right: 0; top: auto; bottom: 0;
+      width: 100%; height: 86vh;
+      border-left: none; border-top: 1px solid var(--line);
+      border-radius: 16px 16px 0 0;
+      animation: cirrusSlideUp .22s cubic-bezier(.22,.61,.36,1) both;
+    }
+    .cirrus-panel.collapsed { height: auto; }
+    @keyframes cirrusSlideUp {
+      from { transform: translateY(24px); opacity: 0; }
+      to { transform: none; opacity: 1; }
+    }
+  }
 `;

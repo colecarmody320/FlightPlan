@@ -10,7 +10,7 @@ import {
   FlyingTab,
   ReadinessView,
 } from "./aviation.jsx";
-import { CIRRUS_CSS, migrateCirrus, CirrusDock } from "./cirrus.jsx";
+import { CIRRUS_CSS, migrateCirrus, CirrusDock, CirrusHomeStrip } from "./cirrus.jsx";
 const ALLOWED_EMAIL = "nicholasmcarmody@gmail.com";
 
 /* ============================================================
@@ -1088,9 +1088,24 @@ export default function CollegeHub() {
   const [authLoading, setAuthLoading] = useState(true);
   const [tab, setTab] = useState("home");
   const [openCourse, setOpenCourse] = useState(null);
+  const [cirrusOpen, setCirrusOpen] = useState(false);
   const first = useRef(true);
   const cabin = useCabin();
   const visited = useRef(new Set());
+
+  // Cmd+J / Ctrl+J toggles the Cirrus panel from anywhere in the app,
+  // except while the user is typing.
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key.toLowerCase() !== "j" || !(e.metaKey || e.ctrlKey)) return;
+      const tag = (e.target?.tagName || "").toLowerCase();
+      if (tag === "input" || tag === "textarea" || e.target?.isContentEditable) return;
+      e.preventDefault();
+      setCirrusOpen((v) => !v);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   useEffect(() => {
     supabase.auth.getSession().then(async ({ data: { session } }) => {
@@ -1318,11 +1333,13 @@ export default function CollegeHub() {
         <button style={S.btn} className="btn" onClick={signOut}>
           Sign out
         </button>
-        <CirrusDock data={data} update={update} />
+        <CirrusDock data={data} update={update} open={cirrusOpen} setOpen={setCirrusOpen} />
       </header>
 
       <main key={tab} className={walking ? "view walk" : "view"}>
-        {tab === "home" && <Home data={data} go={setTab} update={update} />}
+        {tab === "home" && (
+          <Home data={data} go={setTab} update={update} openCirrus={() => setCirrusOpen(true)} />
+        )}
         {tab === "cards" && <CardsTab data={data} update={update} />}
         {tab === "study" && <StudyTab data={data} update={update} />}
         {tab === "grades" && <GradesTab data={data} update={update} />}
@@ -1357,7 +1374,7 @@ export default function CollegeHub() {
 /* ============================================================
    HOME
    ============================================================ */
-function Home({ data, go, update }) {
+function Home({ data, go, update, openCirrus }) {
   const ranked = live(data)
     .map((c) => ({ course: c, ...studyPriority(c, data) }))
     .sort((a, b) => b.score - a.score);
@@ -1426,6 +1443,7 @@ function Home({ data, go, update }) {
     <div>
       <Greeting data={data} go={go} />
       <div style={{ height: 30 }} />
+      <CirrusHomeStrip data={data} openPanel={openCirrus} />
       <Section title="Daily">
         <DailyPanel />
       </Section>
