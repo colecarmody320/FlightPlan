@@ -235,22 +235,39 @@ function ImageField({ label, value, onChange }) {
 const live = (data) => data.courses.filter((c) => !c.archived);
 const archived = (data) => data.courses.filter((c) => c.archived);
 
-/* ---------- storage ---------- */
-async function loadData() {
-  try {
-    const saved = localStorage.getItem(KEY);
-    return saved ? JSON.parse(saved) : null;
-  } catch (e) {
-    console.error("load failed", e);
+/* ---------- cloud storage ---------- */
+
+async function loadCloudData(userId) {
+  const { data, error } = await supabase
+    .from("flightplan_data")
+    .select("data")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("cloud load failed", error);
     return null;
   }
+
+  return data?.data || null;
 }
 
-async function saveData(data) {
-  try {
-    localStorage.setItem(KEY, JSON.stringify(data));
-  } catch (e) {
-    console.error("save failed", e);
+async function saveCloudData(userId, flightData) {
+  const { error } = await supabase
+    .from("flightplan_data")
+    .upsert(
+      {
+        user_id: userId,
+        data: flightData,
+        updated_at: new Date().toISOString(),
+      },
+      {
+        onConflict: "user_id",
+      }
+    );
+
+  if (error) {
+    console.error("cloud save failed", error);
   }
 }
 
@@ -741,26 +758,135 @@ function Greeting({ data, go }) {
    ============================================================ */
 export default function CollegeHub() {
   const [data, setData] = useState(null);
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [tab, setTab] = useState("home");
   const [openCourse, setOpenCourse] = useState(null);
   const first = useRef(true);
 
   useEffect(() => {
-    (async () => setData(migrate(await loadData())))();
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user || null);
+      setAuthLoading(false);
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user || null);
+      setAuthLoading(false);
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
   useEffect(() => {
-    if (!data) return;
+    if (!user) {
+      setData(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    (async () => {
+      const cloud = await loadCloudData(user.id);
+
+      if (!cancelled) {
+        setData(migrate(cloud));
+        first.current = true;
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
+
+  useEffect(() => {
+    if (!user || !data) return;
+
     if (first.current) {
       first.current = false;
       return;
     }
-    const t = setTimeout(() => saveData(data), 500);
+
+    const t = setTimeout(() => {
+      saveCloudData(user.id, data);
+    }, 500);
+
     return () => clearTimeout(t);
-  }, [data]);
+  }, [data, user]);
+
+  useEffect(() => {
+    if (!user) return;
+
+    const channel = supabase
+      .channel(`flightplan-${user.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "flightplan_data",
+          filter: `user_id=eq.${user.id}`,
+        },
+        (payload) => {
+          const incoming = payload.new?.data;
+
+          if (incoming) {
+            first.current = true;
+            setData(migrate(incoming));
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [user]);
+
+  const signIn = async () => {
+    await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: {
+        redirectTo: "https://colecarmody320.github.io/FlightPlan/",
+      },
+    });
+  };
+
+  const signOut = async () => {
+    await supabase.auth.signOut();
+  };
 
   const update = (fn) => setData((d) => fn({ ...d }));
-  if (!data) return <div style={S.page}>Loading…</div>;
+
+  if (authLoading) {
+    return <div style={S.page}>Loading…</div>;
+  }
+
+  if (!user) {
+    return (
+      <div style={S.page}>
+        <style>{CSS}</style>
+        <div style={{ paddingTop: 80, maxWidth: 480 }}>
+          <p style={S.eyebrow}>FLIGHTPLAN</p>
+          <h1 style={{ fontSize: 42 }}>Your data, everywhere.</h1>
+          <p style={S.dim}>
+            Sign in with Google to sync FlightPlan across your devices.
+          </p>
+
+          <button style={S.btn} className="btn cta" onClick={signIn}>
+            Continue with Google
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!data) {
+    return <div style={S.page}>Loading FlightPlan…</div>;
+  }
 
   return (
     <div style={S.page} className="hub">
@@ -803,6 +929,13 @@ export default function CollegeHub() {
         >
           Start studying
         </button>
+         <button
+  style={S.btn}
+  className="btn"
+  onClick={signOut}
+>
+  Sign out
+</button>
       </header>
 
       <main>
