@@ -31,7 +31,7 @@ const RATE_WINDOW_MS = 60_000;
 const MAX_ATTEMPTS = 2; // one initial try plus one conservative retry
 
 const DEFAULT_PROVIDER = "gemini";
-const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
+const DEFAULT_GEMINI_MODEL = "gemini-3.6-flash";
 const GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
 
 /** Only these context keys may be forwarded. Anything else is dropped. */

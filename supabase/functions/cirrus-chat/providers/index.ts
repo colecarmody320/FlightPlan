@@ -10,9 +10,10 @@ import { createGeminiProvider } from "./gemini.ts";
    ============================================================ */
 
 const DEFAULT_PROVIDER = "gemini";
-// gemini-2.0-flash 404s against this project's key; 2.5-flash resolves.
-// Override per-environment with CIRRUS_MODEL.
-const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash";
+// Google retires older flash models for new users; 2.0 and 2.5 both
+// return NOT_FOUND and its error names the current replacement. Override
+// per-environment with CIRRUS_MODEL rather than editing this.
+const DEFAULT_GEMINI_MODEL = "gemini-3.6-flash";
 
 type ProviderFactory = () => CirrusProvider;
 
