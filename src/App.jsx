@@ -23,7 +23,7 @@ const ALLOWED_EMAIL = "nicholasmcarmody@gmail.com";
 const uid = () => Math.random().toString(36).slice(2, 10);
 
 /* iCal day codes, so a Brightspace RRULE maps straight in later. */
-const DAY_ORDER = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
+const DAY_ORDER = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
 
 const todayISO = () => {
   const d = new Date();
@@ -1379,13 +1379,13 @@ export default function CollegeHub() {
 
       <main key={tab} className={walking ? "view walk" : "view"}>
         {tab === "home" && (
-          <Home data={data} go={setTab} update={update} openCirrus={() => setCirrusOpen(true)} />
+          <Home data={data} go={setTab} update={update} openCirrus={() => setCirrusOpen(true)} user={user} />
         )}
         {tab === "cards" && <CardsTab data={data} update={update} />}
         {tab === "study" && <StudyTab data={data} update={update} />}
         {tab === "grades" && <GradesTab data={data} update={update} />}
         {tab === "goals" && <GoalsTab data={data} update={update} />}
-        {tab === "calendar" && <CalendarTab data={data} />}
+        {tab === "calendar" && <CalendarTab data={data} user={user} />}
         {tab === "personal" && <PersonalTab data={data} update={update} />}
         {tab === "flying" && <FlyingTab data={data} update={update} />}
         {tab === "courses" &&
@@ -1416,7 +1416,7 @@ export default function CollegeHub() {
 /* ============================================================
    HOME
    ============================================================ */
-function Home({ data, go, update, openCirrus }) {
+function Home({ data, go, update, openCirrus, user }) {
   const ranked = live(data)
     .map((c) => ({ course: c, ...studyPriority(c, data) }))
     .sort((a, b) => b.score - a.score);
@@ -1493,7 +1493,7 @@ function Home({ data, go, update, openCirrus }) {
         <MissionPanel data={data} go={go} update={update} helpers={AV_HELP} />
       </Section>
       <Section title="This week">
-        <ThisWeekPanel data={data} go={go} />
+        <ThisWeekPanel data={data} user={user} go={go} />
       </Section>
       <Section title="Goals">
         {data.goals.filter((g) => !g.done).length === 0 ? (

@@ -41,8 +41,11 @@ export const EVENT_TYPES = {
   OTHER: "other",
 };
 
-/* iCal day codes — chosen now so a Brightspace RRULE maps straight in. */
-export const DAY_CODES = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
+/* iCal day codes, in display order. The week runs Sunday -> Saturday,
+   and this array is indexed directly by JS getDay() (0 = Sunday), so
+   the two never drift apart. Codes are still iCal codes, so a
+   Brightspace RRULE maps straight in. */
+export const DAY_CODES = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
 export const DAY_LABELS = { MO: "Mon", TU: "Tue", WE: "Wed", TH: "Thu", FR: "Fri", SA: "Sat", SU: "Sun" };
 
 /* ---------- date helpers (local time, matching app convention) ---------- */
@@ -57,11 +60,14 @@ export function addDaysISO(iso, n) {
   return isoOf(new Date(y, m - 1, d + n));
 }
 
-/** Monday-based, matching App's weekStart(). */
+/** Sunday-based: the calendar week runs Sun -> Sat.
+    Deliberately independent of App's weekStart(), which stays
+    Monday-based because it defines the window for weekly study, gym
+    and mileage targets. Changing that would silently shift those
+    stats; this only affects how the calendar is laid out. */
 export function weekStartISO(iso = todayISO()) {
   const [y, m, d] = iso.split("-").map(Number);
-  const dt = new Date(y, m - 1, d);
-  return addDaysISO(iso, -((dt.getDay() + 6) % 7));
+  return addDaysISO(iso, -new Date(y, m - 1, d).getDay());
 }
 
 export function weekDays(anchorISO = todayISO()) {
@@ -71,7 +77,7 @@ export function weekDays(anchorISO = todayISO()) {
 
 export function dayCodeOf(iso) {
   const [y, m, d] = iso.split("-").map(Number);
-  return DAY_CODES[(new Date(y, m - 1, d).getDay() + 6) % 7];
+  return DAY_CODES[new Date(y, m - 1, d).getDay()];
 }
 
 /** "HH:MM" -> minutes from midnight. Returns null on anything malformed. */
