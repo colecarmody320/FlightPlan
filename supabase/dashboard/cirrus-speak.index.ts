@@ -49,9 +49,37 @@ type SpeakErrorCode =
   | "provider_rate_limited"
   | "provider_timeout"
   | "provider_error"
+  /* Distinct because the fixes are completely different: a quota
+     problem is solved on a billing page, a rejected key in the
+     dashboard, a missing voice in the voice library. Collapsing them
+     into one "unavailable" message cost a round trip of guessing. */
+  | "provider_quota"
+  | "provider_auth"
+  | "provider_voice_missing"
   | "server_misconfigured"
   | "network_error"
   | "unknown";
+
+/** ElevenLabs' HTTP status, translated into which knob to turn. */
+function classifyProviderStatus(status: number): { code: SpeakErrorCode; hint: string } {
+  switch (status) {
+    case 401:
+    case 403:
+      return { code: "provider_auth", hint: "ELEVENLABS_API_KEY was rejected." };
+    case 402:
+      return {
+        code: "provider_quota",
+        hint: "The ElevenLabs account is out of credit for this billing period.",
+      };
+    case 404:
+      return { code: "provider_voice_missing", hint: "ELEVENLABS_VOICE_ID was not found." };
+    case 422:
+    case 400:
+      return { code: "provider_error", hint: "ElevenLabs rejected the request itself." };
+    default:
+      return { code: "provider_error", hint: "" };
+  }
+}
 
 const envInt = (name: string, fallback: number) => {
   const raw = Deno.env.get(name);
@@ -311,6 +339,32 @@ Deno.serve(async (req: Request) => {
       out.problem = `Could not reach ElevenLabs: ${(err as Error)?.message || "network error"}`;
     }
 
+    /* A key can be perfectly valid and still have nothing left to
+       spend, which is exactly the case that looked like a
+       configuration problem and was not. */
+    try {
+      const sr = await timedFetch("https://api.elevenlabs.io/v1/user/subscription", {
+        headers: { "xi-api-key": key },
+      });
+      if (sr.ok) {
+        const sub = await sr.json();
+        const used = Number(sub?.character_count ?? 0);
+        const limit = Number(sub?.character_limit ?? 0);
+        out.charactersUsed = used;
+        out.characterLimit = limit;
+        out.charactersRemaining = limit ? Math.max(0, limit - used) : null;
+        out.tier = sub?.tier ?? null;
+        if (limit && used >= limit) {
+          out.problem =
+            "The ElevenLabs account has used its entire character allowance for this billing period. Speech will fail with HTTP 402 until it renews or the plan is upgraded.";
+        }
+      } else {
+        out.subscriptionStatus = sr.status;
+      }
+    } catch {
+      out.subscriptionStatus = null;
+    }
+
     if (voice) {
       try {
         const vr = await timedFetch(
@@ -407,18 +461,23 @@ Deno.serve(async (req: Request) => {
 
   if (!res.ok) {
     const detail = await providerDetail(res);
+    const { code, hint } = classifyProviderStatus(res.status);
     log("provider_error", {
       user: userTag(user.id),
       status: res.status,
+      code,
       modelId,
+      // ElevenLabs' own words. Not a secret, and the single most useful
+      // thing to have in the log when this happens again.
+      detail: detail.slice(0, 200),
       ms: Date.now() - started,
     });
     if (res.status === 429) {
       return errorResponse("provider_rate_limited", "ElevenLabs is rate limiting.", 429, origin);
     }
     return errorResponse(
-      "provider_error",
-      `ElevenLabs returned ${res.status} (model ${modelId}): ${detail}`,
+      code,
+      `${hint || `ElevenLabs returned ${res.status}`} (model ${modelId}) — ${detail}`,
       502,
       origin,
     );
