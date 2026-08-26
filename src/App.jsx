@@ -23,7 +23,7 @@ const ALLOWED_EMAIL = "nicholasmcarmody@gmail.com";
 const uid = () => Math.random().toString(36).slice(2, 10);
 
 /* iCal day codes, so a Brightspace RRULE maps straight in later. */
-const DAY_ORDER = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
+const DAY_ORDER = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
 
 const todayISO = () => {
   const d = new Date();
