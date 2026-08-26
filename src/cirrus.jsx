@@ -4,11 +4,12 @@ import { useCirrusConversation } from "./cirrusConversation.js";
 import {
   createApprovalManager,
   describeProposal,
-  detectBulkDestructive,
-  INTENT,
-  interpretApproval,
+  classifyUtterance,
+  ROUTES,
 } from "./cirrusApproval.js";
 import { createActionHistory } from "./cirrusActions.js";
+import { useVoiceInput, SPEECH_STATES } from "./cirrusSpeech.js";
+import { useCirrusVoice } from "./cirrusVoice.js";
 
 /* ============================================================
    CIRRUS — personal assistant layer
@@ -187,6 +188,31 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
 
   const [pending, setPending] = useState(null);
 
+  /* ---------- voice (Stage 7) ----------
+     Mode behaviour is the one already documented for Cirrus, not a new
+     one: OFF has no microphone and no speech; QUIET is typed, with no
+     microphone and no spoken responses; COMPANION is where voice lives
+     and starts from one deliberate tap. `voiceAllowed` gates both
+     modules at construction, so in OFF and QUIET the microphone cannot
+     be opened and no ElevenLabs request can be made — not merely
+     hidden in the UI. */
+  const voiceAllowed = mode === CIRRUS_MODES.COMPANION;
+  // Set by the first deliberate mic tap. Until then Cirrus stays silent
+  // even in Companion, so typing never unexpectedly starts talking.
+  const [voiceSession, setVoiceSession] = useState(false);
+  const [micNote, setMicNote] = useState(null);
+
+  const tts = useCirrusVoice({ enabled: voiceAllowed });
+  const ttsRef = useRef(tts);
+  ttsRef.current = tts;
+
+  useEffect(() => {
+    if (!voiceAllowed) {
+      setVoiceSession(false);
+      setMicNote(null);
+    }
+  }, [voiceAllowed]);
+
   // `data` and `update` change identity on every save, so the runtime is
   // read fresh at call time rather than captured when a proposal is made.
   const runtimeRef = useRef({ data, update, helpers });
@@ -218,6 +244,19 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
     return () => clearInterval(t);
   }, [pending, syncPending]);
 
+  /* Everything Cirrus says goes through here: it always lands in the
+     transcript, and is spoken only when a voice session is live. Speech
+     is strictly additive — if it fails, the line is already on screen. */
+  const sayRef = useRef(null);
+  sayRef.current = (text) => {
+    conversation.addMessage("assistant", text);
+    if (voiceAllowed && voiceSession) {
+      // Fire and forget: a TTS failure must never block the UI.
+      ttsRef.current.speak(text);
+    }
+  };
+  const say = useCallback((text) => sayRef.current(text), []);
+
   const resolveApproval = useCallback(
     (input) => {
       const result = approvalRef.current.resolve(input, runtimeRef.current);
@@ -231,10 +270,10 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
           : result.status === "no_pending_action"
           ? "There's nothing waiting for approval."
           : result.message || "That couldn't be completed.";
-      conversation.addMessage("assistant", said);
+      say(said);
       return result;
     },
-    [conversation, syncPending]
+    [say, syncPending]
   );
 
   useEffect(() => {
@@ -253,42 +292,130 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
   const setMode = (m) =>
     update((d) => ({ ...d, cirrus: { ...(d.cirrus || blankCirrus()), mode: m } }));
 
+  /* ============================================================
+     THE SUBMIT PATH
+
+     Typed text and a speech transcript are the same thing by the time
+     they reach here: a string. There is no voice branch below this
+     line — no voiceApproval(), no voice-only action route, no relaxed
+     rule because the user "sounds certain". Voice is a transport that
+     produces the argument to this function, nothing more.
+
+     `spoken` only ever makes Cirrus more cautious: it gates on
+     transcription confidence before letting a heard word resolve a
+     destructive change.
+     ============================================================ */
+  const submitText = useCallback(
+    async (raw, { spoken = false, lowConfidence = false } = {}) => {
+      const text = (raw || "").trim();
+      if (conversation.sending) return;
+
+      const { route } = classifyUtterance({
+        text,
+        hasPending: Boolean(approvalRef.current.getPending()),
+        spoken,
+        lowConfidence,
+      });
+
+      // An empty or whitespace-only transcript is not a message. Nothing
+      // is sent and no action can follow from it.
+      if (route === ROUTES.IGNORE) return;
+
+      if (route === ROUTES.REFUSE_BULK) {
+        conversation.addMessage("user", text);
+        say(
+          "I won't do that. I can only change one record at a time, and only with your approval each time. If you want something removed, name it specifically."
+        );
+        return;
+      }
+
+      if (route === ROUTES.LOW_CONFIDENCE) {
+        // The transaction stays pending and the buttons remain. This is
+        // stricter than the typed path, never looser.
+        conversation.addMessage("user", text);
+        say("I'm not confident I heard that correctly. Say it again, or use Approve or Cancel.");
+        return;
+      }
+
+      if (route === ROUTES.RESOLVE_APPROVAL) {
+        conversation.addMessage("user", text);
+        resolveApproval(text);
+        return;
+      }
+
+      // CONVERSE. Note that an ambiguous answer to a pending change
+      // lands here: the change stays pending and "yes, but which card?"
+      // asks rather than executes.
+      const result = await conversation.send(text);
+      if (result?.ok && voiceAllowed && voiceSession) {
+        // The reply is already rendered; speaking it is a separate,
+        // failable step that cannot delay or discard the text.
+        ttsRef.current.speak(result.reply);
+      }
+    },
+    [conversation, say, resolveApproval, voiceAllowed, voiceSession]
+  );
+
   const sendDraft = (e) => {
     e.preventDefault();
     const text = draft.trim();
     if (!text || conversation.sending) return;
-
-    // Bulk destruction is refused here, before any model call. No
-    // registry action can perform one, so there is nothing to ask about.
-    if (detectBulkDestructive(text)) {
-      conversation.addMessage("user", text);
-      conversation.addMessage(
-        "assistant",
-        "I won't do that. I can only change one record at a time, and only with your approval each time. If you want something removed, name it specifically."
-      );
-      setDraft("");
-      return;
-    }
-
-    // With a change pending, the reply is an answer to that question
-    // first. Anything short of an unmistakable yes or no leaves the
-    // change pending and goes to Cirrus as an ordinary message — so
-    // "yes, but which card?" asks rather than executes.
-    if (approvalRef.current.getPending()) {
-      const intent = interpretApproval(text);
-      if (intent !== INTENT.AMBIGUOUS) {
-        conversation.addMessage("user", text);
-        resolveApproval(text);
-        setDraft("");
-        return;
-      }
-    }
-
-    conversation.send(text);
     setDraft("");
+    submitText(text);
   };
 
-  const statusLabel = mode === CIRRUS_MODES.OFF ? "off" : conversation.voiceState;
+  /* A transcript always appears in the conversation before anything
+     acts on it — `submitText` renders the user message on every branch,
+     and `conversation.send` does so on the ordinary one. Nothing is
+     ever sent that the user cannot see, and no transcript is invented. */
+  const handleTranscript = useCallback(
+    (text, meta) => {
+      submitText(text, { spoken: true, lowConfidence: Boolean(meta?.low) });
+    },
+    [submitText]
+  );
+
+  const mic = useVoiceInput({ enabled: voiceAllowed, onTranscript: handleTranscript });
+
+  /* One control, two jobs: stop if listening, otherwise start.
+     `unlock()` runs synchronously inside the tap because iOS grants
+     audio permission to the gesture, not to the later network
+     continuation that actually has something to play. */
+  const toggleMic = useCallback(() => {
+    if (!voiceAllowed) return;
+    setMicNote(null);
+    if (mic.listening) {
+      mic.stop();
+      return;
+    }
+    ttsRef.current.unlock();
+    // Starting a new turn always silences the old one, so Cirrus never
+    // talks over the user and no duplicate request is in flight.
+    ttsRef.current.stop();
+    if (!voiceSession) setVoiceSession(true);
+    const r = mic.start();
+    if (!r.ok && r.code === "already_listening") setMicNote("Already listening.");
+  }, [voiceAllowed, mic, voiceSession]);
+
+  const stopSpeaking = useCallback(() => ttsRef.current.stop(), []);
+
+  /* The waveform reflects what is actually happening, in the order
+     that matters to the user. Nothing here animates on a timer or
+     invents activity: every branch is a real, observable condition. */
+  const displayState =
+    mode === CIRRUS_MODES.OFF
+      ? WAVEFORM_STATES.PAUSED
+      : mic.listening
+      ? WAVEFORM_STATES.LISTENING
+      : tts.speaking
+      ? WAVEFORM_STATES.SPEAKING
+      : conversation.sending
+      ? WAVEFORM_STATES.THINKING
+      : pending
+      ? WAVEFORM_STATES.APPROVAL
+      : WAVEFORM_STATES.READY;
+
+  const statusLabel = mode === CIRRUS_MODES.OFF ? "off" : displayState;
 
   return (
     <>
@@ -305,7 +432,7 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
         {mode === CIRRUS_MODES.OFF ? (
           <span className="cirrus-dot" aria-hidden="true" />
         ) : (
-          <Waveform state={conversation.voiceState} size={14} />
+          <Waveform state={displayState} size={14} />
         )}
       </button>
 
@@ -319,7 +446,7 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
             aria-label="Cirrus"
           >
             <div className="cirrus-panel-head">
-              <Waveform state={conversation.voiceState} size={18} />
+              <Waveform state={displayState} size={18} />
               <div className="cirrus-head-text">
                 <span className="cirrus-title">Cirrus</span>
                 <span className="cirrus-status">
@@ -404,6 +531,37 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
                       )}
                     </div>
 
+                    {mic.listening && (
+                      <p className="cirrus-note listening" aria-live="polite">
+                        Listening… {mic.interim ? <em>{mic.interim}</em> : "speak now"}
+                      </p>
+                    )}
+                    {tts.speaking && (
+                      <div className="cirrus-speaking-row" aria-live="polite">
+                        <span className="cirrus-note dim">Speaking…</span>
+                        <button type="button" className="cirrus-chip live" onClick={stopSpeaking}>
+                          Stop
+                        </button>
+                      </div>
+                    )}
+                    {micNote && <p className="cirrus-note dim">{micNote}</p>}
+                    {mic.error && (
+                      <div className="cirrus-error" role="status">
+                        <p className="cirrus-error-msg">{mic.error.message}</p>
+                        {mic.state === SPEECH_STATES.DENIED && (
+                          <p className="cirrus-error-detail">
+                            Typing still works. Cirrus won't ask again this session.
+                          </p>
+                        )}
+                      </div>
+                    )}
+                    {tts.error && (
+                      <div className="cirrus-error" role="status">
+                        <p className="cirrus-error-msg">{tts.error.message}</p>
+                        <p className="cirrus-error-detail">The reply above is unaffected.</p>
+                      </div>
+                    )}
+
                     <ApprovalCard
                       pending={pending}
                       data={data}
@@ -432,6 +590,19 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
                         disabled={conversation.sending}
                         onChange={(e) => setDraft(e.target.value)}
                       />
+                      {voiceAllowed && mic.supported && (
+                        <button
+                          type="button"
+                          className={mic.listening ? "cirrus-mic on" : "cirrus-mic"}
+                          onClick={toggleMic}
+                          disabled={conversation.sending}
+                          aria-pressed={mic.listening}
+                          aria-label={mic.listening ? "Stop listening" : "Speak to Cirrus"}
+                          title={mic.listening ? "Stop listening" : "Speak to Cirrus"}
+                        >
+                          {mic.listening ? "■" : "🎙"}
+                        </button>
+                      )}
                       <button
                         type="submit"
                         className="btn"
@@ -441,9 +612,20 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
                       </button>
                     </form>
 
-                    {mode === CIRRUS_MODES.COMPANION && (
+                    {mode === CIRRUS_MODES.COMPANION && !mic.supported && (
                       <p className="cirrus-note dim">
-                        Voice starts from a deliberate action here — not yet wired.
+                        This browser can't transcribe speech. Typing still works.
+                      </p>
+                    )}
+                    {mode === CIRRUS_MODES.COMPANION && mic.supported && !voiceSession && (
+                      <p className="cirrus-note dim">
+                        Tap the microphone to speak. Your device transcribes the audio —
+                        FlightPlan never records or stores it.
+                      </p>
+                    )}
+                    {mode === CIRRUS_MODES.QUIET && (
+                      <p className="cirrus-note dim">
+                        Quiet is typed only. Switch to Companion for voice.
                       </p>
                     )}
                   </>
@@ -485,6 +667,37 @@ export function CirrusHomeStrip({ data, openPanel }) {
 }
 
 export const CIRRUS_CSS = `
+/* ---------- voice controls (Stage 7) ---------- */
+.cirrus-mic{
+  flex:0 0 auto; width:36px; height:36px; border-radius:9px;
+  border:1px solid rgba(255,255,255,.18); background:transparent;
+  color:inherit; font-size:15px; line-height:1; cursor:pointer;
+  display:inline-flex; align-items:center; justify-content:center;
+}
+.cirrus-mic:hover:not(:disabled){ background:rgba(255,255,255,.07); }
+.cirrus-mic:disabled{ opacity:.4; cursor:default; }
+.cirrus-mic.on{
+  background:rgba(255,120,100,.18); border-color:rgba(255,140,120,.55);
+  animation:cirrusMicPulse 1.3s ease-in-out infinite;
+}
+@keyframes cirrusMicPulse{
+  0%,100%{ box-shadow:0 0 0 0 rgba(255,140,120,.34); }
+  50%{ box-shadow:0 0 0 5px rgba(255,140,120,0); }
+}
+.cirrus-note.listening em{ font-style:normal; opacity:.85; }
+.cirrus-speaking-row{
+  display:flex; align-items:center; justify-content:space-between;
+  gap:8px; margin:2px 0 4px;
+}
+.cirrus-chip.live{
+  cursor:pointer; opacity:1;
+  border-color:rgba(255,255,255,.26); background:rgba(255,255,255,.05);
+}
+.cirrus-chip.live:hover{ background:rgba(255,255,255,.1); }
+@media (prefers-reduced-motion: reduce){
+  .cirrus-mic.on{ animation:none; }
+}
+
 /* ---------- approval card (Stage 6) ---------- */
 .cirrus-approval{
   border:1px solid rgba(255,255,255,.16);

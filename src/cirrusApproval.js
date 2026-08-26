@@ -153,6 +153,45 @@ export function interpretApproval(text) {
   return INTENT.AMBIGUOUS;
 }
 
+/* ============================================================
+   UTTERANCE ROUTING
+
+   Where a message goes is decided here, once, for typed text and
+   speech alike. Keeping it as one pure function is the point: there
+   is no second routing table for voice to drift away from, and the
+   decision can be tested directly rather than inferred from the UI.
+
+   `spoken` never unlocks anything. Its only effect is the
+   `low_confidence` branch, which is strictly more cautious than the
+   typed path — a destructive change is not worth a guess at what was
+   heard.
+   ============================================================ */
+export const ROUTES = {
+  IGNORE: "ignore",                 // empty or whitespace: not a message
+  REFUSE_BULK: "refuse_bulk",       // bulk destruction, refused before any model call
+  RESOLVE_APPROVAL: "resolve",      // an unmistakable yes/no answering a pending change
+  LOW_CONFIDENCE: "low_confidence", // heard, but not clearly enough to act on
+  CONVERSE: "converse",             // everything else goes to Cirrus as normal
+};
+
+export function classifyUtterance({ text, hasPending = false, spoken = false, lowConfidence = false } = {}) {
+  const clean = String(text || "").trim();
+  if (!clean) return { route: ROUTES.IGNORE };
+  if (detectBulkDestructive(clean)) return { route: ROUTES.REFUSE_BULK };
+
+  if (hasPending) {
+    const intent = interpretApproval(clean);
+    if (intent !== INTENT.AMBIGUOUS) {
+      // Ambiguity already falls through to CONVERSE below, so the only
+      // thing left to guard is a confident-sounding word we may have
+      // misheard.
+      if (spoken && lowConfidence) return { route: ROUTES.LOW_CONFIDENCE, intent };
+      return { route: ROUTES.RESOLVE_APPROVAL, intent };
+    }
+  }
+  return { route: ROUTES.CONVERSE };
+}
+
 /* ---------- bulk destructive guard ---------- */
 const BULK_PATTERNS = [
   /\b(delete|remove|clear|wipe|erase|drop|purge)\b[\s\w]*\b(all|everything|every|entire)\b/,
