@@ -60,6 +60,23 @@ export const RESTART_DELAY_MS = 450;
 /** Consecutive faults — not silences — before the session gives up. */
 export const ERROR_BUDGET = 3;
 
+/* Ways a recognition cycle can end that mean "that cycle is over",
+   never "the conversation is over". Each re-arms rather than counting
+   against the error budget: a hands-free conversation is mostly
+   silence, and silence is not a fault.
+
+   `aborted` is handled separately, on its own budget — see below. */
+export const CYCLE_ENDS = new Set(["silence", "no_speech"]);
+
+/** Consecutive browser aborts before we accept that recognition cannot
+    hold. Generous and deliberately separate from ERROR_BUDGET: the
+    browser aborts recognition whenever something else takes the audio
+    session, and on Safari the thing taking it is Cirrus's own
+    ElevenLabs playback — once per turn, every turn. Counted as faults,
+    that ends a perfectly healthy conversation after three replies. A
+    genuine spin still stops. */
+export const ABORT_BUDGET = 8;
+
 /** No speech heard for this long ends the session. Matches the
     five-minute conversational idle timeout Cirrus was specified with. */
 export const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
@@ -103,6 +120,7 @@ export function useCirrusSession({ enabled = false, mic, tts, runTurn, onEnded }
   const pausedRef = useRef(false);     // held by the user; mic released
   const turnLock = useRef(false);      // one turn in flight, ever
   const errorsRef = useRef(0);
+  const abortsRef = useRef(0);         // consecutive browser aborts
   const startedAtRef = useRef(0);
   const lastVoiceRef = useRef(0);
   const restartTimer = useRef(null);
@@ -154,14 +172,27 @@ export function useCirrusSession({ enabled = false, mic, tts, runTurn, onEnded }
   }, [end]);
 
   /**
-   * Opens the microphone again, if every condition still holds.
+   * THE ONE WAY BACK TO LISTENING.
    *
-   * Deliberately paranoid: each guard here is a way the loop could
-   * otherwise run away or talk over itself.
+   * Every path that could reopen the microphone goes through here — a
+   * finished turn, a silent stretch, an aborted cycle, resume, an
+   * interruption — so the conditions are stated once and cannot drift
+   * apart. It restarts only when all of these hold:
+   *
+   *   - the session is still running (not ended, mode still Companion)
+   *   - the user has not paused
+   *   - no turn is in flight (Cirrus is not thinking)
+   *   - Cirrus is not speaking
+   *   - no recognition session is already active
+   *   - the session has not outlived its ceiling
+   *
+   * The delay is a floor on restart speed, not a guess at when the
+   * browser will be ready: every condition above is re-checked when it
+   * fires, because any of them can change during the wait.
    */
-  const listenAgain = useCallback(
+  const resumeContinuousListening = useCallback(
     (delay = RESTART_DELAY_MS) => {
-      if (!activeRef.current) return;
+      if (!activeRef.current) return;           // session ended
       if (pausedRef.current) return;            // held: the mic stays shut
       if (restartTimer.current) return;         // one pending restart
       if (turnLock.current) return;             // a turn is still running
@@ -179,7 +210,15 @@ export function useCirrusSession({ enabled = false, mic, tts, runTurn, onEnded }
         if (pausedRef.current) return;
         // Never open the microphone while audio is still playing.
         if (ttsRef.current?.speaking) {
-          listenAgain(200);
+          resumeContinuousListening(200);
+          return;
+        }
+        /* Already capturing — nothing to do. Starting a second
+           recognizer here is what produces duplicate transcripts and
+           duplicate Cirrus requests, so this guard is load-bearing
+           even though start() would also refuse. */
+        if (micRef.current?.listening) {
+          setState(SESSION_STATES.LISTENING);
           return;
         }
         const r = micRef.current?.start?.();
@@ -203,7 +242,7 @@ export function useCirrusSession({ enabled = false, mic, tts, runTurn, onEnded }
         // gesture — counts against the budget rather than looping.
         errorsRef.current += 1;
         if (errorsRef.current >= ERROR_BUDGET) end(END_REASONS.ERRORS);
-        else listenAgain(RESTART_DELAY_MS * 2);
+        else resumeContinuousListening(RESTART_DELAY_MS * 2);
       }, delay);
     },
     [end]
@@ -222,7 +261,9 @@ export function useCirrusSession({ enabled = false, mic, tts, runTurn, onEnded }
       // queued: it would otherwise be answered out of order.
       if (turnLock.current) return;
       turnLock.current = true;
-      errorsRef.current = 0;             // real speech clears the budget
+      // Real speech proves recognition is working: both budgets clear.
+      errorsRef.current = 0;
+      abortsRef.current = 0;
       lastVoiceRef.current = Date.now();
       armIdleTimer();
 
@@ -247,19 +288,27 @@ export function useCirrusSession({ enabled = false, mic, tts, runTurn, onEnded }
         if (activeRef.current) {
           if (limited) end(END_REASONS.LIMIT);
           else if (errorsRef.current >= ERROR_BUDGET) end(END_REASONS.ERRORS);
-          else listenAgain();
+          else resumeContinuousListening();
         }
       }
     },
-    [armIdleTimer, end, listenAgain]
+    [armIdleTimer, end, resumeContinuousListening]
   );
 
-  /** Recognition finished without producing anything. */
+  /**
+   * A RECOGNITION CYCLE ENDED — which is not the conversation ending.
+   *
+   * This distinction is the whole point of the function. The recognizer
+   * ends constantly and by design: after every utterance, after every
+   * silent stretch, and whenever the browser takes the audio session
+   * away. None of those mean the user is finished talking to Cirrus.
+   * Only a fatal fault or an exhausted budget ends the session here.
+   */
   const handleRecognitionEnd = useCallback(
     (info) => {
       if (!activeRef.current) return;
       /* The abort that pause performs surfaces here as an ordinary
-         session end. It is expected, so it neither costs error budget
+         cycle end. It is expected, so it neither costs error budget
          nor triggers a restart. */
       if (pausedRef.current) return;
       if (info?.delivered) return;       // handleTranscript owns that path
@@ -267,18 +316,30 @@ export function useCirrusSession({ enabled = false, mic, tts, runTurn, onEnded }
         end(info.reason === "denied" ? END_REASONS.DENIED : END_REASONS.UNAVAILABLE);
         return;
       }
-      // Silence is ordinary in a hands-free conversation and must not
-      // burn the error budget; anything else is a genuine fault.
-      if (info?.reason && info.reason !== "silence" && info.reason !== "no_speech") {
+
+      const reason = info?.reason;
+      if (reason === "aborted") {
+        /* Counted separately and generously. One abort per turn is
+           normal on Safari — playback takes the audio session — so this
+           must not share the three-strike budget that real faults use.
+           A genuine spin still stops. */
+        abortsRef.current += 1;
+        if (abortsRef.current >= ABORT_BUDGET) {
+          end(END_REASONS.ERRORS);
+          return;
+        }
+      } else if (reason && !CYCLE_ENDS.has(reason)) {
+        // A genuine fault. Silence and no-speech are ordinary in a
+        // hands-free conversation and never count.
         errorsRef.current += 1;
         if (errorsRef.current >= ERROR_BUDGET) {
           end(END_REASONS.ERRORS);
           return;
         }
       }
-      if (!turnLock.current) listenAgain();
+      if (!turnLock.current) resumeContinuousListening();
     },
-    [end, listenAgain]
+    [end, resumeContinuousListening]
   );
 
   /**
@@ -317,13 +378,14 @@ export function useCirrusSession({ enabled = false, mic, tts, runTurn, onEnded }
     // A pause of any length should not inherit the previous stretch's
     // faults; the user has just demonstrated the session is wanted.
     errorsRef.current = 0;
+    abortsRef.current = 0;
     armIdleTimer();
     if (ttsRef.current?.speaking) setState(SESSION_STATES.SPEAKING);
     else if (turnLock.current) setState(SESSION_STATES.THINKING);
     // Resume is a tap, so it carries the activation a restart may need.
-    listenAgain(0);
+    resumeContinuousListening(0);
     return true;
-  }, [armIdleTimer, listenAgain]);
+  }, [armIdleTimer, resumeContinuousListening]);
 
   /**
    * Stops Cirrus mid-sentence and hands the floor back.
@@ -345,9 +407,9 @@ export function useCirrusSession({ enabled = false, mic, tts, runTurn, onEnded }
        resolves. Only reopen here when nothing is running — a stray tail
        of audio outside a turn would otherwise leave the session with
        the floor and no one listening. */
-    if (!turnLock.current) listenAgain(0);
+    if (!turnLock.current) resumeContinuousListening(0);
     return true;
-  }, [armIdleTimer, listenAgain]);
+  }, [armIdleTimer, resumeContinuousListening]);
 
   /**
    * Begins a session. Must be called from a real user gesture: that is
@@ -366,6 +428,7 @@ export function useCirrusSession({ enabled = false, mic, tts, runTurn, onEnded }
     pausedRef.current = false;
     turnLock.current = false;
     errorsRef.current = 0;
+    abortsRef.current = 0;
     startedAtRef.current = Date.now();
     lastVoiceRef.current = Date.now();
     setNote(null);
