@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase } from "./supabase.js";
+import { toSpokenText } from "./cirrusSpeechText.js";
 
 /* ============================================================
    CIRRUS — SPEECH OUTPUT (Stage 7)
@@ -243,11 +244,23 @@ export function useCirrusVoice({ enabled = true } = {}) {
       const a = getAudio();
       if (!a) return { ok: false, code: "unknown" };
 
-      // A new utterance always supersedes the old one.
+      /* Speech and the transcript diverge here, and only here. The line
+         is already on screen with its formatting intact; what goes to
+         ElevenLabs is the same sentence with the notation removed. */
+      const spoken = toSpokenText(text);
+
+      /* A new utterance always supersedes the old one — including a
+         silent one. Stopping before the nothing-to-speak check matters:
+         otherwise a reply that happened to be pure notation would leave
+         the PREVIOUS answer still playing underneath a new one. */
       stop();
       const turn = turnRef.current;
 
-      const result = await fetchSpeech(text);
+      // Nothing left to say once the notation is gone. Silence is the
+      // right output, and it costs no synthesis.
+      if (!spoken) return { ok: false, code: "nothing_to_speak" };
+
+      const result = await fetchSpeech(spoken);
       if (!result.ok) {
         if (turn === turnRef.current) {
           setError({
