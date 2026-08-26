@@ -169,6 +169,11 @@ export function ApprovalCard({ pending, data, onApprove, onCancel }) {
   );
 }
 
+/* Voice failures that happen entirely in the browser. The Edge
+   Function has nothing to add about these, so no diagnostic control is
+   offered for them. */
+const CLIENT_SIDE_TTS_CODES = new Set(["playback_blocked", "disabled", "superseded", "empty_audio"]);
+
 /* What Cirrus says after an action actually ran. Built from the
    registry's own result rather than from anything the model claimed, so
    it can only ever report what really happened. */
@@ -395,6 +400,10 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
     if (m !== CIRRUS_MODES.COMPANION) {
       micRef.current?.release();
       ttsRef.current?.stop();
+      // A voice error is noise once voice is deliberately off; Quiet
+      // should not carry a complaint about a subsystem it never uses.
+      ttsRef.current?.clearError?.();
+      setVoiceReport(null);
       setVoiceSession(false);
     }
     update((d) => ({ ...d, cirrus: { ...(d.cirrus || blankCirrus()), mode: m } }));
@@ -707,6 +716,12 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
                           </p>
                         )}
                         <p className="cirrus-error-detail">The reply above is unaffected.</p>
+                        {/* Offered only for failures the server can
+                            explain. A blocked autoplay or a superseded
+                            turn is a browser-side fact we already know,
+                            and asking the function about it would tell
+                            the user nothing. */}
+                        {!CLIENT_SIDE_TTS_CODES.has(tts.error.code) && (
                         <button
                           type="button"
                           className="cirrus-chip live"
@@ -723,6 +738,7 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
                         >
                           Why?
                         </button>
+                        )}
                         {voiceReport && <p className="cirrus-error-detail">{voiceReport}</p>}
                       </div>
                     )}
