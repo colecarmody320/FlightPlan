@@ -126,13 +126,15 @@ export function useCirrusConversation({ mode, page, selectedObject } = {}) {
   const send = useCallback(
     async (text) => {
       const trimmed = (text || "").trim();
-      if (!trimmed) return;
+      if (!trimmed) return { ok: false, code: "empty" };
 
       const snapshot = stateRef.current;
-      if (snapshot.sending) return; // one in-flight turn at a time
+      if (snapshot.sending) return { ok: false, code: "busy" }; // one in-flight turn at a time
       // OFF means zero requests — enforced here as well as in the
       // service, so no call path can reach the network while off.
-      if (!snapshot.mode || snapshot.mode === CIRRUS_MODES.OFF) return;
+      if (!snapshot.mode || snapshot.mode === CIRRUS_MODES.OFF) {
+        return { ok: false, code: "off" };
+      }
 
       // History as it stood *before* this message; the new message is
       // sent separately as `message`.
@@ -164,7 +166,10 @@ export function useCirrusConversation({ mode, page, selectedObject } = {}) {
           error: null,
           voiceState: WAVEFORM_STATES.READY,
         }));
-        return;
+        // Returned so a caller can speak the reply. The transcript is
+        // already updated either way — nothing downstream can delay or
+        // suppress the text by acting on this.
+        return { ok: true, reply: result.reply };
       }
 
       // A failure leaves the transcript and every byte of application
@@ -178,6 +183,7 @@ export function useCirrusConversation({ mode, page, selectedObject } = {}) {
         error: { code: result.code, message: result.message, detail: result.detail },
         voiceState: WAVEFORM_STATES.READY,
       }));
+      return { ok: false, code: result.code };
     },
     [addMessage]
   );
