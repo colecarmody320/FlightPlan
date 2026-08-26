@@ -173,7 +173,7 @@ function mapError(err) {
  * The caller decides what to do with a low-confidence transcript; this
  * module never sends anything anywhere itself.
  */
-export function useVoiceInput({ enabled = false, onTranscript } = {}) {
+export function useVoiceInput({ enabled = false, onTranscript, onEnd } = {}) {
   const support = useMemo(speechSupport, []);
   const [state, setState] = useState(support.available ? SPEECH_STATES.IDLE : SPEECH_STATES.UNAVAILABLE);
   const [interim, setInterim] = useState("");
@@ -186,6 +186,12 @@ export function useVoiceInput({ enabled = false, onTranscript } = {}) {
   const timerRef = useRef(null);
   const onTranscriptRef = useRef(onTranscript);
   onTranscriptRef.current = onTranscript;
+  /* Fires whenever a session finishes, saying whether it produced
+     anything. A continuous conversation needs this: a silent stretch
+     ends recognition without a transcript, and something has to decide
+     whether to listen again. */
+  const onEndRef = useRef(onEnd);
+  onEndRef.current = onEnd;
 
   // Once the user has said no, we explain instead of prompting again.
   // Browsers remember the decision anyway; re-calling start() would
@@ -323,6 +329,9 @@ export function useVoiceInput({ enabled = false, onTranscript } = {}) {
           ? SPEECH_STATES.IDLE
           : SPEECH_STATES.ERROR
       );
+      // `no_speech` is an ordinary silent turn; anything else is a real
+      // fault the session should count against its error budget.
+      onEndRef.current?.({ delivered: false, reason: code, fatal: code === "denied" || code === "audio_capture" });
     };
 
     r.onend = () => {
@@ -339,11 +348,15 @@ export function useVoiceInput({ enabled = false, onTranscript } = {}) {
       confidenceRef.current = null;
       // An empty utterance is not a message. Nothing is sent, nothing
       // is fabricated, and no action can follow from it.
-      if (!text) return;
+      if (!text) {
+        onEndRef.current?.({ delivered: false, reason: "silence" });
+        return;
+      }
       onTranscriptRef.current?.(text, {
         confidence,
         low: typeof confidence === "number" && confidence < MIN_CONFIDENCE,
       });
+      onEndRef.current?.({ delivered: true, reason: "transcript" });
     };
 
     try {
