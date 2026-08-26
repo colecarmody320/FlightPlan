@@ -1,4 +1,13 @@
 import {
+  buildCalendarEvents,
+  eventsForDay,
+  freeWindows,
+  nextEvent as calNextEvent,
+  upcomingDeadlines,
+  weekDays,
+  todayISO as calToday,
+} from "./calendar.js";
+import {
   totals as flightTotals,
   currency as currencyRows,
   readinessScores,
@@ -596,6 +605,59 @@ export function fitnessContext(data, helpers) {
 }
 
 /* ============================================================
+   CALENDAR (read-only)
+   Compact by design: counts, titles and times — never a dump of every
+   event description. Detailed descriptions are omitted entirely at this
+   stage, so nothing sensitive from an external calendar can leak into a
+   prompt by default.
+   ============================================================ */
+export function calendarContext(data, externalEvents = []) {
+  const today = calToday();
+  const days = weekDays(today);
+  const events = buildCalendarEvents(data, { from: days[0], to: days[6], externalEvents });
+
+  if (!events.length) {
+    return {
+      state: "empty",
+      reason: "nothing scheduled this week",
+      freshness: { flightplan: "live", brightspace: "not_configured", google: "not_configured" },
+    };
+  }
+
+  const compact = (e) => ({
+    title: e.title,
+    type: e.eventType,
+    date: e.date,
+    ...(e.allDay ? { allDay: true } : { start: e.start, end: e.end || null }),
+    ...(e.location ? { location: e.location } : {}),
+    source: e.source,
+  });
+
+  const todays = eventsForDay(events, today);
+  const next = calNextEvent(events, today);
+
+  return {
+    today: {
+      date: today,
+      timed: todays.timed.map(compact),
+      allDay: todays.allDay.map(compact),
+    },
+    week: days.map((iso) => {
+      const d = eventsForDay(events, iso);
+      return { date: iso, timed: d.timed.length, allDay: d.allDay.length };
+    }),
+    nextEvent: next ? compact(next) : null,
+    upcomingDeadlines: upcomingDeadlines(events, today, 5).map(compact),
+    freeWindowsToday: freeWindows(events, today),
+    freshness: {
+      flightplan: "live",
+      brightspace: "not_configured",
+      google: "not_configured",
+    },
+  };
+}
+
+/* ============================================================
    RELEVANCE
    Which domains a request actually needs. Sending everything wastes
    tokens and buries the useful part.
@@ -608,18 +670,20 @@ const DOMAIN_KEYWORDS = {
   aviation: ["flight", "fly", "flying", "logbook", "hours", "aircraft", "pilot", "currency", "checkride", "solo", "landing"],
   readiness: ["ready", "readiness", "prepared", "weak", "strong", "struggl"],
   weather: ["weather", "metar", "taf", "wind", "ceiling", "visibility", "vfr", "ifr", "minimum"],
+  calendar: ["calendar", "schedule", "class", "when", "today", "tomorrow", "week", "free", "busy", "due", "deadline", "meeting"],
   fitness: ["gym", "run", "running", "lift", "workout", "mile", "fitness", "train"],
 };
 
 /** Which domains the current page implies, for "explain this" style asks. */
 const PAGE_DOMAINS = {
-  home: ["mission", "academics", "goals"],
+  home: ["mission", "academics", "goals", "calendar"],
   cards: ["cards", "readiness"],
   study: ["cards", "academics"],
   grades: ["academics"],
   goals: ["goals"],
   personal: ["fitness", "goals"],
   flying: ["aviation", "weather"],
+  calendar: ["calendar"],
   courses: ["academics"],
 };
 
@@ -676,6 +740,7 @@ export function buildCirrusContext({
   selectedObject = null,
   activeTopic = null,
   weather = null,
+  externalEvents = [],
   domains = null,
 } = {}) {
   if (!data) return { error: "no data", domains: [], context: {} };
@@ -692,6 +757,14 @@ export function buildCirrusContext({
       // A malformed legacy record must never take down the assistant.
       // Degrade that one domain and keep the rest.
       context[domain] = UNAVAILABLE(`could not be summarized: ${err?.message || "error"}`);
+    }
+  }
+
+  if (chosen.includes("calendar")) {
+    try {
+      context.calendar = calendarContext(data, externalEvents);
+    } catch (err) {
+      context.calendar = UNAVAILABLE(`could not be summarized: ${err?.message || "error"}`);
     }
   }
 

@@ -11,6 +11,7 @@ import {
   ReadinessView,
 } from "./aviation.jsx";
 import { CIRRUS_CSS, migrateCirrus, CirrusDock, CirrusHomeStrip } from "./cirrus.jsx";
+import { CalendarTab, ThisWeekPanel, CALENDAR_CSS } from "./calendarUI.jsx";
 const ALLOWED_EMAIL = "nicholasmcarmody@gmail.com";
 
 /* ============================================================
@@ -20,6 +21,9 @@ const ALLOWED_EMAIL = "nicholasmcarmody@gmail.com";
    ============================================================ */
 
 const uid = () => Math.random().toString(36).slice(2, 10);
+
+/* iCal day codes, so a Brightspace RRULE maps straight in later. */
+const DAY_ORDER = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
 
 const todayISO = () => {
   const d = new Date();
@@ -73,6 +77,7 @@ function newCourse(code, name, tier = "support", term = "") {
     target: 90,
     weeklyMinutes: 120,
     categories: [],
+    meetingTimes: [],
   };
 }
 
@@ -95,6 +100,7 @@ const blank = () => ({
   goals: [],
   personal: blankPersonal(),
   settings: blankSettings(),
+  calendarEvents: [],
   ...migrateAviation(null),
   ...migrateCirrus(null),
 });
@@ -108,6 +114,10 @@ function migrate(d) {
       categories: [],
       term: "",
       archived: false,
+      // Additive: recurring class meetings for the calendar. Defaults sit
+      // BEFORE the spread, so any existing value on the record wins and
+      // nothing already saved is overwritten.
+      meetingTimes: [],
       ...c,
       tier: c.tier || (looksAviation(c) ? "core" : "support"),
     })),
@@ -134,6 +144,9 @@ function migrate(d) {
       ...g,
     })),
     settings: { ...blankSettings(), ...(d.settings || {}) },
+    // Additive: user-created one-off calendar events. Existing data
+    // without this key simply starts empty; nothing is rewritten.
+    calendarEvents: d.calendarEvents || [],
     ...migrateAviation(d),
     ...migrateCirrus(d),
     personal: {
@@ -1305,7 +1318,7 @@ export default function CollegeHub() {
 
   return (
     <div style={{ ...S.page, ...cabin.vars }} className={`hub ${cabin.phase}`}>
-      <style>{CSS + AV_CSS + CIRRUS_CSS}</style>
+      <style>{CSS + AV_CSS + CIRRUS_CSS + CALENDAR_CSS}</style>
 
       <header className="bar">
         <Mark
@@ -1323,6 +1336,7 @@ export default function CollegeHub() {
             ["study", "Study"],
             ["grades", "Grades"],
             ["goals", "Goals"],
+            ["calendar", "Calendar"],
             ["personal", "Personal"],
             ["flying", "Flying"],
             ["courses", "Courses"],
@@ -1371,6 +1385,7 @@ export default function CollegeHub() {
         {tab === "study" && <StudyTab data={data} update={update} />}
         {tab === "grades" && <GradesTab data={data} update={update} />}
         {tab === "goals" && <GoalsTab data={data} update={update} />}
+        {tab === "calendar" && <CalendarTab data={data} />}
         {tab === "personal" && <PersonalTab data={data} update={update} />}
         {tab === "flying" && <FlyingTab data={data} update={update} />}
         {tab === "courses" &&
@@ -1476,6 +1491,9 @@ function Home({ data, go, update, openCirrus }) {
       </Section>
       <Section title="Today's mission">
         <MissionPanel data={data} go={go} update={update} helpers={AV_HELP} />
+      </Section>
+      <Section title="This week">
+        <ThisWeekPanel data={data} go={go} />
       </Section>
       <Section title="Goals">
         {data.goals.filter((g) => !g.done).length === 0 ? (
@@ -3824,12 +3842,18 @@ function CourseDetail({ data, update, courseId, back }) {
         {course.archived ? "Restore to current semester" : "Archive this course"}
       </button>
       <nav style={S.subnav}>
-        {[["notes", "Notes"], ["reference", "Reference"], ["search", "Search all notes"]].map(([k, l]) => (
+        {[["notes", "Notes"], ["schedule", "Schedule"], ["reference", "Reference"], ["search", "Search all notes"]].map(([k, l]) => (
           <button key={k} onClick={() => setSub(k)} className={sub === k ? "tab on" : "tab"}>
             {l}
           </button>
         ))}
       </nav>
+
+      {sub === "schedule" && (
+        <Section title="Class meeting times">
+          <MeetingTimes course={course} update={update} />
+        </Section>
+      )}
 
       {sub === "reference" && (
         <Section title="Course reference">
@@ -3859,6 +3883,89 @@ function CourseDetail({ data, update, courseId, back }) {
       {sub === "notes" && <CourseNotes data={data} update={update} courseId={courseId} />}
       {sub === "search" && <AllNotes data={data} />}
     </div>
+  );
+}
+
+/* Recurring class meetings. Additive per course: writes only
+   course.meetingTimes and leaves every other field untouched. */
+function MeetingTimes({ course, update }) {
+  const rows = course.meetingTimes || [];
+  const [days, setDays] = useState([]);
+  const [start, setStart] = useState("");
+  const [end, setEnd] = useState("");
+  const [where, setWhere] = useState("");
+  const [msg, setMsg] = useState("");
+
+  const writeRows = (next) =>
+    update((d) => {
+      d.courses = d.courses.map((c) =>
+        c.id === course.id ? { ...c, meetingTimes: next } : c
+      );
+      return d;
+    });
+
+  const toggleDay = (code) =>
+    setDays((prev) => (prev.includes(code) ? prev.filter((x) => x !== code) : [...prev, code]));
+
+  const add = () => {
+    if (!days.length) return setMsg("Pick at least one day.");
+    if (!/^\d{1,2}:\d{2}$/.test(start)) return setMsg("Start time must look like 10:00.");
+    if (end && !/^\d{1,2}:\d{2}$/.test(end)) return setMsg("End time must look like 10:50.");
+    writeRows([
+      ...rows,
+      { id: uid(), days: DAY_ORDER.filter((c) => days.includes(c)), start, end, location: where.trim() },
+    ]);
+    setDays([]); setStart(""); setEnd(""); setWhere(""); setMsg("");
+  };
+
+  return (
+    <>
+      {rows.length === 0 && (
+        <p style={S.dim}>
+          No meeting times yet. FlightPlan doesn't know when this class meets until you add it here —
+          nothing is guessed.
+        </p>
+      )}
+      {rows.map((r) => (
+        <div key={r.id} style={{ marginBottom: 8 }}>
+          <b>{(r.days || []).join(" ")}</b>{" "}
+          <span style={S.dim}>
+            {r.start}{r.end ? `–${r.end}` : ""}{r.location ? ` · ${r.location}` : ""}
+          </span>{" "}
+          <button
+            style={S.btn}
+            className="btn"
+            onClick={() => writeRows(rows.filter((x) => x.id !== r.id))}
+          >
+            Remove
+          </button>
+        </div>
+      ))}
+
+      <div style={{ marginTop: 14 }}>
+        <label style={S.label}>Days</label>
+        <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8 }}>
+          {DAY_ORDER.map((code) => (
+            <button
+              key={code}
+              type="button"
+              className={days.includes(code) ? "tab on" : "tab"}
+              onClick={() => toggleDay(code)}
+            >
+              {code}
+            </button>
+          ))}
+        </div>
+        <label style={S.label}>Start (24h, e.g. 10:00)</label>
+        <input style={S.input} value={start} onChange={(e) => setStart(e.target.value)} placeholder="10:00" />
+        <label style={S.label}>End (optional)</label>
+        <input style={S.input} value={end} onChange={(e) => setEnd(e.target.value)} placeholder="10:50" />
+        <label style={S.label}>Location (optional)</label>
+        <input style={S.input} value={where} onChange={(e) => setWhere(e.target.value)} placeholder="Kohrman Hall" />
+        <button style={S.btn} className="btn" onClick={add}>Add meeting time</button>
+        {msg && <p style={S.late}>{msg}</p>}
+      </div>
+    </>
   );
 }
 
