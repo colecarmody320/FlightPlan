@@ -316,9 +316,36 @@ export function useVoiceInput({ enabled = false, onTranscript, onEnd } = {}) {
       liveRecognizers.delete(r);
       endRecognizer(r);
       if (recognitionRef.current === r) recognitionRef.current = null;
-      // "aborted" is our own cancel() and "no-speech" is a normal
-      // silent session; neither is worth an error banner.
-      if (code === "aborted") return;
+      /* An abort reaching this handler is NOT our own cancel().
+         teardown() nulls these handlers before it aborts, so our own
+         aborts are silent by construction — anything that arrives here
+         was started by the browser. Safari does it routinely, most
+         often when another element takes the audio session, which is
+         exactly what ElevenLabs playback does on every single turn.
+
+         It still ends this recognition cycle, and the caller has to
+         hear about it: endRecognizer() above has already nulled
+         `onend`, so this is the only remaining signal. Swallowing it
+         leaves a continuous session believing it is still listening
+         while nothing is capturing — the loop stops dead with no
+         error to explain why.
+
+         Reported without a banner: it is a cycle ending, not a fault
+         the user has to read about or act on. */
+      if (code === "aborted") {
+        /* Wind the hook back to idle exactly as onend would, because
+           onend is no longer coming — endRecognizer() nulled it. Left
+           out, `state` stays LISTENING for a recognizer that is dead:
+           the hook reports that it is capturing when it is not, the
+           dock renders "Listening — just talk.", and the session's
+           restart guard sees an active recognition and declines to
+           reopen. Everything downstream believes a lie told here. */
+        startingRef.current = false;
+        setInterim("");
+        setState((s) => (s === SPEECH_STATES.LISTENING ? SPEECH_STATES.IDLE : s));
+        onEndRef.current?.({ delivered: false, reason: "aborted", fatal: false });
+        return;
+      }
       setError({ code, message: SPEECH_ERRORS[code] || SPEECH_ERRORS.unknown });
       setState(
         code === "denied"
