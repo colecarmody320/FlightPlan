@@ -1079,6 +1079,26 @@ function Greeting({ data, go }) {
 
 const AV_HELP = { studyPriority, courseGrade, live, gymDays, sumMiles, weekStart };
 
+/* Helpers Cirrus's read-only context engine needs. Injected rather than
+   imported so cirrusContext.js never has to import App.jsx, which would
+   close an App -> cirrus -> cirrusContext -> App import cycle. Same
+   pattern as AV_HELP above. Read-only: every entry is a pure derivation
+   over `data`, and none of them writes. */
+export const CIRRUS_HELP = {
+  live,
+  courseGrade,
+  letterFor,
+  GPA_PTS,
+  studyPriority,
+  goalProgress,
+  goalPace,
+  gymDays,
+  sumMiles,
+  weekStart,
+  todayISO,
+  daysBetween,
+};
+
 /* ============================================================
    APP
    ============================================================ */
