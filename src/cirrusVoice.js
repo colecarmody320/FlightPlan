@@ -225,9 +225,17 @@ export function useCirrusVoice({ enabled = true } = {}) {
   }, [getAudio]);
 
   /**
-   * Speaks `text`. Resolves to {ok:true} or {ok:false, code} — the
-   * caller ignores the result unless it wants to show why voice is
-   * quiet. The reply is already on screen either way.
+   * Speaks `text`, resolving when playback has actually FINISHED —
+   * not when it starts.
+   *
+   * A continuous conversation turns on this distinction: the
+   * microphone must stay shut until Cirrus has stopped talking, or it
+   * transcribes Cirrus. Every exit resolves exactly once — ended,
+   * error, superseded by a newer utterance, or stopped by the user —
+   * so a caller awaiting it can never hang.
+   *
+   * Callers that only want fire-and-forget speech can still ignore the
+   * promise; the reply is on screen either way.
    */
   const speak = useCallback(
     async (text) => {
@@ -260,27 +268,47 @@ export function useCirrusVoice({ enabled = true } = {}) {
       urlRef.current = url;
       a.src = url;
 
-      const done = () => {
-        if (turn !== turnRef.current) return;
-        setSpeaking(false);
-        releaseUrl();
+      // One settle, whichever way playback ends.
+      let settle;
+      const finished = new Promise((resolve) => { settle = resolve; });
+      let settled = false;
+      const done = (outcome) => {
+        if (settled) return;
+        settled = true;
+        if (turn === turnRef.current) {
+          setSpeaking(false);
+          releaseUrl();
+        }
+        settle(outcome);
       };
-      a.onended = done;
-      a.onerror = done;
+      a.onended = () => done({ ok: true });
+      a.onerror = () => done({ ok: false, code: "playback_error" });
+      // A stop() or a newer utterance bumps the turn; poll for that so
+      // an interrupted turn resolves rather than waiting for an
+      // "ended" event that will never come.
+      const watch = setInterval(() => {
+        if (turn !== turnRef.current) {
+          clearInterval(watch);
+          done({ ok: false, code: "superseded" });
+        }
+      }, 120);
 
       try {
         setSpeaking(true);
         setError(null);
         await a.play();
-        return { ok: true };
       } catch {
         // Autoplay refused — usually because the turn didn't start from
         // a tap. Text is already visible, so this is a quiet failure.
-        setSpeaking(false);
-        releaseUrl();
-        setError({ code: "playback_blocked", message: TTS_ERRORS.playback_blocked });
+        clearInterval(watch);
+        setError({ code: "playback_blocked", message: TTS_ERRORS.playback_blocked, detail: null });
+        done({ ok: false, code: "playback_blocked" });
         return { ok: false, code: "playback_blocked" };
       }
+
+      const outcome = await finished;
+      clearInterval(watch);
+      return outcome;
     },
     [enabled, getAudio, stop, releaseUrl]
   );

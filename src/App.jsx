@@ -4506,11 +4506,24 @@ const CSS = `
   }
   @keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
 
-  /* windsock */
+  /* windsock
+     Decoration, never a control. Two rules keep it that way.
+
+     pointer-events: none, because it has no handler and must never
+     swallow a tap meant for whatever is underneath it.
+
+     z-index below the header, because the rule giving every direct
+     child of .hub position:relative and z-index:1 puts each one in its
+     own stacking context — so the header's z-index 5 governs everything
+     inside it, the Cirrus panel included, however high that panel's own
+     z-index is. At 15 this sat above the whole panel and covered its
+     input row. At 2 it still floats over flat page content and passes
+     safely beneath interactive chrome. */
   .hub .sock-wrap {
     position: fixed;
     right: 16px; bottom: 16px;
-    z-index: 15;
+    z-index: 2;
+    pointer-events: none;
     opacity: .85;
     text-align: center;
   }

@@ -860,12 +860,24 @@ define("create_google_calendar_event", {
       return failure(res.code || "provider_error", res.detail || "Google didn't accept that event.", "create_google_calendar_event");
     }
 
-    g.invalidate?.();
+    /* A 200 is not a confirmation. Google returns the created event,
+       and its id is the proof that something now exists; without one
+       there is nothing to report as created, so this is a failure
+       rather than a success message full of blanks. */
     const ev = res.data?.event || {};
+    if (!ev.eventId) {
+      return failure(
+        "provider_error",
+        "Google accepted the request but returned no event, so I can't confirm it was created.",
+        "create_google_calendar_event"
+      );
+    }
+
+    g.invalidate?.();
     return success("create_google_calendar_event", {
       eventId: ev.eventId,
-      title: ev.title,
-      date: ev.date,
+      title: ev.title || p.title,
+      date: ev.date || when.date,
       when: formatWhen(ev),
       calendarId: dest.calendarId,
     });
@@ -1037,10 +1049,26 @@ const REMOTE_PROTECTED = {
       return failure(code, res.detail || "Google didn't accept that change.", "update_google_calendar_event");
     }
 
-    g.invalidate?.();
     const ev = res.data?.event || {};
+    if (!ev.eventId) {
+      return failure(
+        CONFLICT,
+        "Google accepted the change but returned no event, so I can't confirm it was applied.",
+        "update_google_calendar_event"
+      );
+    }
+
+    g.invalidate?.();
     return success("update_google_calendar_event", {
-      target: { kind: "google event", id: resolved.eventId, title: ev.title, date: ev.date, when: formatWhen(ev) },
+      // Falls back to the values we read a moment ago rather than
+      // printing blanks if a field is missing.
+      target: {
+        kind: "google event",
+        id: resolved.eventId,
+        title: ev.title || current.title,
+        date: ev.date || current.date,
+        when: formatWhen(ev.eventId ? ev : current),
+      },
       applied: "updated",
     });
   },
