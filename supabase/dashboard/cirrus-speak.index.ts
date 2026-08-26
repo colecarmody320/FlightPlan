@@ -49,6 +49,15 @@ type SpeakErrorCode =
   | "provider_rate_limited"
   | "provider_timeout"
   | "provider_error"
+  /* Distinct because the fixes are completely different: a quota
+     problem is solved on a billing page, a rejected key in the
+     dashboard, a missing voice in the voice library. Collapsing them
+     into one "unavailable" message cost a round trip of guessing. */
+  | "provider_quota"
+  | "provider_payment_required"
+  | "provider_blocked"
+  | "provider_auth"
+  | "provider_voice_missing"
   | "server_misconfigured"
   | "network_error"
   | "unknown";
@@ -120,31 +129,94 @@ function log(event: string, fields: Record<string, unknown>) {
 
 const userTag = (id: string) => id.slice(0, 8);
 
-/** ElevenLabs reports failures as JSON even on the audio route. Pull out
-    the human-readable part so a misconfigured voice or a retired model
-    is diagnosable from the client without guesswork. */
-async function providerDetail(res: Response): Promise<string> {
+/**
+ * Pulls apart an ElevenLabs error body.
+ *
+ * ElevenLabs answers failures as:
+ *   { "detail": { "status": "<machine code>", "message": "<prose>" } }
+ * and sometimes as { "detail": "<prose>" } or a validation array.
+ *
+ * The machine code is the part that matters: an HTTP status alone is
+ * ambiguous — 402 covers quota, plan entitlement and abuse blocking
+ * alike — while `detail.status` names which one. Returning them
+ * separately keeps the provider's own verdict intact instead of
+ * flattening it into a guess.
+ *
+ * Contains no key and no request text, so every field here is safe to
+ * log and to show the user.
+ */
+type ProviderFault = { httpStatus: number; code: string | null; message: string };
+
+async function providerFault(res: Response): Promise<ProviderFault> {
+  const fallback: ProviderFault = { httpStatus: res.status, code: null, message: `HTTP ${res.status}` };
   try {
     const text = await res.text();
-    if (!text) return `HTTP ${res.status}`;
+    if (!text) return fallback;
+    let body: any;
     try {
-      const body = JSON.parse(text);
-      const d = body?.detail;
-      const msg =
-        (typeof d === "string" && d) ||
-        d?.message ||
-        (Array.isArray(d) ? d[0]?.msg : null) ||
-        body?.message;
-      const status = d?.status ? ` (${d.status})` : "";
-      return msg ? `${msg}${status}` : `HTTP ${res.status}`;
+      body = JSON.parse(text);
     } catch {
-      return text.slice(0, 300);
+      return { httpStatus: res.status, code: null, message: text.slice(0, 300) };
     }
+    const d = body?.detail;
+    if (typeof d === "string" && d) return { httpStatus: res.status, code: null, message: d.slice(0, 300) };
+    if (Array.isArray(d)) {
+      return { httpStatus: res.status, code: null, message: String(d[0]?.msg || text).slice(0, 300) };
+    }
+    const code = typeof d?.status === "string" ? d.status : null;
+    const message = String(d?.message || body?.message || `HTTP ${res.status}`).slice(0, 300);
+    return { httpStatus: res.status, code, message };
   } catch {
-    return `HTTP ${res.status}`;
+    return fallback;
   }
 }
 
+/**
+ * Chooses how to describe a failure, preferring what ElevenLabs said
+ * over what its HTTP status implies.
+ *
+ * The status is only a fallback. 402 in particular is not evidence of
+ * an empty balance: it is also returned for plan entitlement and for
+ * abuse blocking, and telling someone with credit remaining to go and
+ * buy more is worse than saying nothing.
+ */
+function classifyFault(fault: ProviderFault): { code: SpeakErrorCode; hint: string } {
+  switch (fault.code) {
+    case "quota_exceeded":
+      return { code: "provider_quota", hint: "The ElevenLabs character allowance for this period is used up." };
+    case "detected_unusual_activity":
+      return {
+        code: "provider_blocked",
+        hint: "ElevenLabs has blocked Free-tier API use from this server's network. It is an account/plan restriction, not a credit balance.",
+      };
+    case "missing_permissions":
+    case "invalid_api_key":
+      return { code: "provider_auth", hint: "The API key lacks the permission this call needs." };
+    case "voice_not_found":
+      return { code: "provider_voice_missing", hint: "ELEVENLABS_VOICE_ID was not found in this workspace." };
+    case "model_not_found":
+    case "invalid_model_id":
+      return { code: "provider_error", hint: "ElevenLabs does not recognise this model id." };
+    default:
+      break;
+  }
+  // No machine code from the provider: describe the status without
+  // inventing a reason for it.
+  switch (fault.httpStatus) {
+    case 401:
+    case 403:
+      return { code: "provider_auth", hint: "ElevenLabs rejected the API key." };
+    case 402:
+      return {
+        code: "provider_payment_required",
+        hint: "ElevenLabs returned 402. That covers plan entitlement and access restrictions as well as balance, so the message below is the authority.",
+      };
+    case 404:
+      return { code: "provider_voice_missing", hint: "ElevenLabs could not find that voice." };
+    default:
+      return { code: "provider_error", hint: "" };
+  }
+}
 
 /* ============================================================
    MODEL RESOLUTION
@@ -305,13 +377,81 @@ Deno.serve(async (req: Request) => {
           out.problem = `ELEVENLABS_MODEL_ID "${configuredModel}" is not one this account can use. Set it to one of availableTextToSpeechModels.`;
         }
       } else {
-        out.problem = `ElevenLabs rejected the key: ${await providerDetail2(mr)}`;
+        out.problem = `ElevenLabs rejected the key: ${(await providerFault(mr)).message}`;
       }
     } catch (err) {
       out.problem = `Could not reach ElevenLabs: ${(err as Error)?.message || "network error"}`;
     }
 
+    /* A key can be perfectly valid and still have nothing left to
+       spend, which is exactly the case that looked like a
+       configuration problem and was not. */
+    try {
+      const sr = await timedFetch("https://api.elevenlabs.io/v1/user/subscription", {
+        headers: { "xi-api-key": key },
+      });
+      if (sr.ok) {
+        const sub = await sr.json();
+        const used = Number(sub?.character_count ?? 0);
+        const limit = Number(sub?.character_limit ?? 0);
+        out.charactersUsed = used;
+        out.characterLimit = limit;
+        out.charactersRemaining = limit ? Math.max(0, limit - used) : null;
+        out.tier = sub?.tier ?? null;
+        out.status = sub?.status ?? null;
+        /* Compare these numbers with what elevenlabs.io shows. If they
+           disagree, the key in Supabase belongs to a different
+           workspace than the one being looked at — which no amount of
+           reading the code would reveal. */
+        out.workspaceCheck =
+          limit
+            ? `This key reports ${Math.max(0, limit - used)} of ${limit} credits remaining on the "${sub?.tier ?? "unknown"}" tier. If that does not match elevenlabs.io, ELEVENLABS_API_KEY is for a different workspace.`
+            : "This key reports no character limit; compare the tier against elevenlabs.io.";
+        if (limit && used >= limit) {
+          out.problem =
+            "The ElevenLabs character allowance for this period is fully used.";
+        }
+      } else {
+        out.subscriptionStatus = sr.status;
+      }
+    } catch {
+      out.subscriptionStatus = null;
+    }
+
+    /* A live one-word probe. Nothing else establishes what actually
+       happens when Cirrus speaks — the models and subscription
+       endpoints can both succeed while synthesis is refused, which is
+       exactly the situation that made this look like a configuration
+       fault. The provider's own verdict is reported verbatim. */
     if (voice) {
+      try {
+        const probe = await timedFetch(
+          `${ELEVENLABS_ENDPOINT}/${encodeURIComponent(voice)}?output_format=${encodeURIComponent(DEFAULT_OUTPUT_FORMAT)}`,
+          {
+            method: "POST",
+            headers: { "xi-api-key": key, "Content-Type": "application/json", Accept: "audio/mpeg" },
+            body: JSON.stringify({ text: "Hi.", model_id: resolved?.model || configuredModel }),
+          },
+        );
+        out.probeStatus = probe.status;
+        out.probeContentType = probe.headers.get("content-type");
+        if (probe.ok) {
+          const bytes = (await probe.arrayBuffer()).byteLength;
+          out.probeBytes = bytes;
+          out.probeSucceeded = bytes > 0;
+          if (bytes > 0) out.problem = null;
+        } else {
+          const fault = await providerFault(probe);
+          out.probeSucceeded = false;
+          out.providerCode = fault.code;
+          out.providerMessage = fault.message;
+          out.problem = `Speech is refused with HTTP ${fault.httpStatus}${fault.code ? ` (${fault.code})` : ""}: ${fault.message}`;
+        }
+      } catch (err) {
+        out.probeSucceeded = null;
+        out.probeError = (err as Error)?.name || "error";
+      }
+
       try {
         const vr = await timedFetch(
           `https://api.elevenlabs.io/v1/voices/${encodeURIComponent(voice)}`,
@@ -319,7 +459,7 @@ Deno.serve(async (req: Request) => {
         );
         out.voiceStatus = vr.status;
         out.voiceIdIsValid = vr.ok;
-        if (!vr.ok) out.problem = `ELEVENLABS_VOICE_ID is not usable: ${await providerDetail2(vr)}`;
+        if (!vr.ok) out.problem = `ELEVENLABS_VOICE_ID is not usable: ${(await providerFault(vr)).message}`;
       } catch {
         out.voiceIdIsValid = null;
       }
@@ -406,10 +546,17 @@ Deno.serve(async (req: Request) => {
   clearTimeout(timeout);
 
   if (!res.ok) {
-    const detail = await providerDetail(res);
+    const fault = await providerFault(res);
+    const { code, hint } = classifyFault(fault);
     log("provider_error", {
       user: userTag(user.id),
-      status: res.status,
+      status: fault.httpStatus,
+      // The provider's own machine-readable verdict. This is the field
+      // that distinguishes a spent balance from a blocked plan, and its
+      // absence last time is why the cause had to be guessed at.
+      providerCode: fault.code,
+      providerMessage: fault.message,
+      code,
       modelId,
       ms: Date.now() - started,
     });
@@ -417,8 +564,8 @@ Deno.serve(async (req: Request) => {
       return errorResponse("provider_rate_limited", "ElevenLabs is rate limiting.", 429, origin);
     }
     return errorResponse(
-      "provider_error",
-      `ElevenLabs returned ${res.status} (model ${modelId}): ${detail}`,
+      code,
+      `${hint ? `${hint} ` : ""}[${fault.httpStatus}${fault.code ? ` ${fault.code}` : ""}, model ${modelId}] ${fault.message}`,
       502,
       origin,
     );
