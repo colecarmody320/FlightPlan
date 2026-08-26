@@ -42,8 +42,16 @@ export const SESSION_STATES = {
   LISTENING: "listening",
   THINKING: "thinking",
   SPEAKING: "speaking",
+  PAUSED: "paused",
   ENDED: "ended",
 };
+
+/* PAUSED is a held session, not a quiet one. The microphone is released
+   exactly as it is on end() — a pause that merely ignored transcripts
+   would leave the hardware capturing and the browser's recording
+   indicator lit, which is precisely the ambiguity Stage 8 forbids.
+   What pause keeps is the conversation: history, context and the open
+   session, so resume() carries straight on rather than starting over. */
 
 /** Shortest gap between one recognition session ending and the next
     starting. Stops a failing recognizer from spinning. */
@@ -92,6 +100,7 @@ export function useCirrusSession({ enabled = false, mic, tts, runTurn, onEnded }
   const [note, setNote] = useState(null);
 
   const activeRef = useRef(false);
+  const pausedRef = useRef(false);     // held by the user; mic released
   const turnLock = useRef(false);      // one turn in flight, ever
   const errorsRef = useRef(0);
   const startedAtRef = useRef(0);
@@ -124,6 +133,7 @@ export function useCirrusSession({ enabled = false, mic, tts, runTurn, onEnded }
   const end = useCallback((reason = END_REASONS.USER) => {
     const wasActive = activeRef.current;
     activeRef.current = false;
+    pausedRef.current = false;
     clearTimers();
     // Release before anything else: whatever the reason, the microphone
     // must not outlive the session by even a render.
@@ -152,6 +162,7 @@ export function useCirrusSession({ enabled = false, mic, tts, runTurn, onEnded }
   const listenAgain = useCallback(
     (delay = RESTART_DELAY_MS) => {
       if (!activeRef.current) return;
+      if (pausedRef.current) return;            // held: the mic stays shut
       if (restartTimer.current) return;         // one pending restart
       if (turnLock.current) return;             // a turn is still running
       if (Date.now() - startedAtRef.current > MAX_SESSION_MS) {
@@ -162,6 +173,10 @@ export function useCirrusSession({ enabled = false, mic, tts, runTurn, onEnded }
       restartTimer.current = setTimeout(() => {
         restartTimer.current = null;
         if (!activeRef.current || turnLock.current) return;
+        // Re-checked rather than assumed: pause may have arrived during
+        // the delay, and this callback is the last thing standing
+        // between it and an open microphone.
+        if (pausedRef.current) return;
         // Never open the microphone while audio is still playing.
         if (ttsRef.current?.speaking) {
           listenAgain(200);
@@ -198,6 +213,11 @@ export function useCirrusSession({ enabled = false, mic, tts, runTurn, onEnded }
   const handleTranscript = useCallback(
     async (text, meta) => {
       if (!activeRef.current) return;
+      /* Releasing the microphone already drops the recognizer's
+         handlers, so a transcript should never arrive after a pause.
+         This is the second lock on that door: "paused" has to mean
+         nothing is submitted, not merely that nothing new is heard. */
+      if (pausedRef.current) return;
       // A second transcript arriving mid-turn is dropped rather than
       // queued: it would otherwise be answered out of order.
       if (turnLock.current) return;
@@ -238,6 +258,10 @@ export function useCirrusSession({ enabled = false, mic, tts, runTurn, onEnded }
   const handleRecognitionEnd = useCallback(
     (info) => {
       if (!activeRef.current) return;
+      /* The abort that pause performs surfaces here as an ordinary
+         session end. It is expected, so it neither costs error budget
+         nor triggers a restart. */
+      if (pausedRef.current) return;
       if (info?.delivered) return;       // handleTranscript owns that path
       if (info?.fatal) {
         end(info.reason === "denied" ? END_REASONS.DENIED : END_REASONS.UNAVAILABLE);
@@ -258,6 +282,74 @@ export function useCirrusSession({ enabled = false, mic, tts, runTurn, onEnded }
   );
 
   /**
+   * Holds the session: microphone released, conversation kept.
+   *
+   * Deliberately does NOT stop a reply that is already playing. Pause
+   * answers "stop listening to me", and cutting Cirrus off mid-sentence
+   * is a different instruction with its own control (interrupt). The
+   * turn in flight is allowed to finish; its `finally` then finds the
+   * session paused and declines to reopen the microphone.
+   */
+  const pause = useCallback(() => {
+    if (!activeRef.current || pausedRef.current) return false;
+    pausedRef.current = true;
+    // Cancel the pending restart before releasing, so nothing reopens
+    // the microphone a moment after we shut it.
+    if (restartTimer.current) {
+      clearTimeout(restartTimer.current);
+      restartTimer.current = null;
+    }
+    // A held session should not be killed for being quiet — the silence
+    // is the point. The session ceiling still applies.
+    if (idleTimer.current) {
+      clearTimeout(idleTimer.current);
+      idleTimer.current = null;
+    }
+    micRef.current?.release?.();
+    setState(SESSION_STATES.PAUSED);
+    return true;
+  }, []);
+
+  /** Returns to listening, on the same conversation. */
+  const resume = useCallback(() => {
+    if (!activeRef.current || !pausedRef.current) return false;
+    pausedRef.current = false;
+    // A pause of any length should not inherit the previous stretch's
+    // faults; the user has just demonstrated the session is wanted.
+    errorsRef.current = 0;
+    armIdleTimer();
+    if (ttsRef.current?.speaking) setState(SESSION_STATES.SPEAKING);
+    else if (turnLock.current) setState(SESSION_STATES.THINKING);
+    // Resume is a tap, so it carries the activation a restart may need.
+    listenAgain(0);
+    return true;
+  }, [armIdleTimer, listenAgain]);
+
+  /**
+   * Stops Cirrus mid-sentence and hands the floor back.
+   *
+   * This is the barge-in seam. Today it is driven by a button; the
+   * plumbing underneath is the same one true voice-activity barge-in
+   * would use, because stopping playback is what resolves the in-flight
+   * speak() as superseded, which lets the turn finish and the
+   * microphone reopen on the ordinary path.
+   */
+  const interrupt = useCallback(() => {
+    if (!activeRef.current || pausedRef.current) return false;
+    if (!ttsRef.current?.speaking) return false;
+    ttsRef.current.stop();
+    errorsRef.current = 0;     // a deliberate interruption is not a fault
+    lastVoiceRef.current = Date.now();
+    armIdleTimer();
+    /* A turn in flight reopens the microphone itself once its speak()
+       resolves. Only reopen here when nothing is running — a stray tail
+       of audio outside a turn would otherwise leave the session with
+       the floor and no one listening. */
+    if (!turnLock.current) listenAgain(0);
+    return true;
+  }, [armIdleTimer, listenAgain]);
+
+  /**
    * Begins a session. Must be called from a real user gesture: that is
    * what unlocks audio on iOS and grants the first recognition its
    * activation.
@@ -271,6 +363,7 @@ export function useCirrusSession({ enabled = false, mic, tts, runTurn, onEnded }
     }
 
     activeRef.current = true;
+    pausedRef.current = false;
     turnLock.current = false;
     errorsRef.current = 0;
     startedAtRef.current = Date.now();
@@ -309,6 +402,10 @@ export function useCirrusSession({ enabled = false, mic, tts, runTurn, onEnded }
   // "listening" while the microphone is shut.
   useEffect(() => {
     if (!activeRef.current) return;
+    // A held session reports held, whatever the hardware is doing. This
+    // guard is what stops a reply finishing under a pause from flipping
+    // the indicator back to "listening" while the microphone is shut.
+    if (pausedRef.current) return;
     if (tts?.speaking) setState(SESSION_STATES.SPEAKING);
     else if (turnLock.current) setState(SESSION_STATES.THINKING);
     else if (mic?.listening) setState(SESSION_STATES.LISTENING);
@@ -319,8 +416,12 @@ export function useCirrusSession({ enabled = false, mic, tts, runTurn, onEnded }
     note,
     active: activeRef.current,
     running: state !== SESSION_STATES.OFF,
+    paused: state === SESSION_STATES.PAUSED,
     start,
     end,
+    pause,
+    resume,
+    interrupt,
     handleTranscript,
     handleRecognitionEnd,
     clearNote: useCallback(() => setNote(null), []),

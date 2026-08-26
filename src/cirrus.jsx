@@ -614,6 +614,14 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
 
   const stopSpeaking = useCallback(() => ttsRef.current.stop(), []);
 
+  /* Interrupt means the same thing in both worlds: stop talking. Inside
+     a session it also hands the floor back to the user, which is the
+     session's job; outside one — a Stage 7 single reply — stopping the
+     audio is the whole of it. */
+  const interruptCirrus = useCallback(() => {
+    if (!sessionRef.current?.interrupt?.()) stopSpeaking();
+  }, [stopSpeaking]);
+
   /* The waveform reflects what is actually happening, in the order
      that matters to the user. Nothing here animates on a timer or
      invents activity: every branch is a real, observable condition. */
@@ -622,6 +630,10 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
       ? WAVEFORM_STATES.PAUSED
       : session.state === SESSION_STATES.SPEAKING || tts.speaking
       ? WAVEFORM_STATES.SPEAKING
+      : /* Held outranks every remaining branch: a paused session must
+           never animate as though it were listening. */
+      session.paused
+      ? WAVEFORM_STATES.PAUSED
       : session.state === SESSION_STATES.THINKING
       ? WAVEFORM_STATES.THINKING
       : mic.listening
@@ -751,10 +763,18 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
                     </div>
 
                     {session.running && (
-                      <div className="cirrus-session-row" aria-live="polite">
+                      <div
+                        className={session.paused ? "cirrus-session-row paused" : "cirrus-session-row"}
+                        aria-live="polite"
+                      >
                         <span className={`cirrus-session-dot ${session.state}`} aria-hidden="true" />
                         <span className="cirrus-note">
-                          {session.state === SESSION_STATES.SPEAKING
+                          {/* Held comes first: whether the microphone is
+                              open is the one thing the user must never
+                              have to infer. */}
+                          {session.paused
+                            ? "Voice paused — microphone off."
+                            : session.state === SESSION_STATES.SPEAKING
                             ? "Cirrus is speaking…"
                             : session.state === SESSION_STATES.THINKING
                             ? "Thinking…"
@@ -762,9 +782,39 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
                             ? mic.interim
                             : "Listening — just talk."}
                         </span>
-                        <button type="button" className="cirrus-chip live" onClick={() => session.end()}>
-                          End session
-                        </button>
+                        <span className="cirrus-session-controls">
+                          {tts.speaking ? (
+                            <button
+                              type="button"
+                              className="cirrus-chip live"
+                              onClick={interruptCirrus}
+                              aria-label="Interrupt Cirrus and listen instead"
+                            >
+                              Interrupt
+                            </button>
+                          ) : session.paused ? (
+                            <button
+                              type="button"
+                              className="cirrus-chip live"
+                              onClick={() => session.resume()}
+                              aria-label="Resume listening"
+                            >
+                              Resume
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="cirrus-chip"
+                              onClick={() => session.pause()}
+                              aria-label="Pause listening"
+                            >
+                              Pause
+                            </button>
+                          )}
+                          <button type="button" className="cirrus-chip" onClick={() => session.end()}>
+                            End
+                          </button>
+                        </span>
                       </div>
                     )}
                     {!session.running && mic.listening && (
@@ -973,7 +1023,19 @@ export const CIRRUS_CSS = `
   border:1px solid rgba(255,255,255,.14); border-radius:9px;
   background:rgba(120,170,255,.06);
 }
-.cirrus-session-row .cirrus-note{ flex:1; margin:0; }
+/* A held session drops the live tint entirely. The row should read as
+   inactive at a glance, without anyone having to read the words. */
+.cirrus-session-row.paused{ background:rgba(255,255,255,.03); border-color:rgba(255,255,255,.10); }
+/* A long interim transcript truncates rather than pushing the controls
+   off a narrow screen — on a phone these buttons are the only way to
+   stop the microphone, so they win the space. */
+.cirrus-session-row .cirrus-note{
+  flex:1; margin:0; min-width:0;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+/* Controls never shrink or wrap away — on a phone these are the only
+   way to stop the microphone, so they keep their full tap target. */
+.cirrus-session-controls{ display:flex; align-items:center; gap:6px; flex:0 0 auto; }
 .cirrus-session-dot{
   width:7px; height:7px; border-radius:50%; flex:0 0 auto;
   background:var(--muted);
@@ -981,6 +1043,10 @@ export const CIRRUS_CSS = `
 .cirrus-session-dot.listening{ background:var(--lamp); animation:cirrusSessionPulse 1.4s ease-in-out infinite; }
 .cirrus-session-dot.thinking{ background:var(--green-bright); animation:cirrusSessionPulse .7s ease-in-out infinite; }
 .cirrus-session-dot.speaking{ background:var(--bone); animation:cirrusSessionPulse .5s ease-in-out infinite; }
+/* Hollow and still: the visual opposite of every listening state. */
+.cirrus-session-dot.paused{
+  background:transparent; box-shadow:inset 0 0 0 1.5px var(--muted); animation:none;
+}
 @keyframes cirrusSessionPulse{
   0%,100%{ opacity:1; transform:scale(1); }
   50%{ opacity:.45; transform:scale(.8); }
