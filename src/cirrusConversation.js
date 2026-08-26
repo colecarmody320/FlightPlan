@@ -205,7 +205,7 @@ export function useCirrusConversation({ mode, page, selectedObject, getRequestEx
         error: { code: result.code, message: result.message, detail: result.detail },
         voiceState: WAVEFORM_STATES.READY,
       }));
-      return { ok: false, code: result.code };
+      return { ok: false, code: result.code, message: result.message };
     },
     [addMessage]
   );
