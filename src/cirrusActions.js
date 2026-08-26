@@ -702,6 +702,191 @@ define("delete_logbook_entry", {
   },
 });
 
+/* ============================================================
+   PROTECTED EXECUTION (Stage 6)
+
+   Protected actions still have no `handler`, so executeCirrusAction()
+   — the path model output reaches — still cannot run them. They are
+   executed only through executeProtectedAction(), which the approval
+   manager calls after a real user approval.
+
+   This function revalidates on its own rather than trusting its
+   caller: the target must still exist and must still match the
+   fingerprint taken when the proposal was made. A second guard runs
+   inside the update() updater, against the state React actually
+   applies to, so a change landing in that final gap makes the write a
+   no-op instead of an overwrite.
+   ============================================================ */
+
+/** FNV-1a, same approach aviation.jsx already uses for day seeds. */
+function hash(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(36);
+}
+
+/* Which fields make a record "materially changed". FlightPlan keeps no
+   per-record updated_at or version, so the fingerprint is a stable hash
+   of the fields that matter — no schema change, no migration. */
+const PROTECTED_TARGETS = {
+  update_flashcard: { list: "cards", fields: ["front", "back", "topic", "box", "due"] },
+  delete_flashcard: { list: "cards", fields: ["front", "back", "topic", "box", "due"] },
+  update_goal: { list: "goals", fields: ["title", "target", "unit", "deadline", "done"] },
+  delete_goal: { list: "goals", fields: ["title", "target", "unit", "deadline", "done"] },
+  update_logbook_entry: { list: "flights", fields: ["date", "aircraft", "route", "total", "remarks"] },
+  delete_logbook_entry: { list: "flights", fields: ["date", "aircraft", "route", "total", "remarks"] },
+};
+
+const findTarget = (data, listKey, id) => (data[listKey] || []).find((r) => r && r.id === id);
+
+/** Fingerprint of a record as it stands right now, or null if absent. */
+export function fingerprintTarget(actionName, data, id) {
+  const spec = PROTECTED_TARGETS[actionName];
+  if (!spec) return null;
+  const rec = findTarget(data || {}, spec.list, id);
+  if (!rec) return null;
+  return hash(spec.fields.map((f) => `${f}=${JSON.stringify(rec[f] ?? null)}`).join("|"));
+}
+
+/** Human-readable description of the target, from trusted app data. */
+export function describeTarget(actionName, data, id) {
+  const spec = PROTECTED_TARGETS[actionName];
+  if (!spec) return null;
+  const rec = findTarget(data || {}, spec.list, id);
+  if (!rec) return null;
+  if (spec.list === "cards") {
+    return { kind: "flashcard", id: rec.id, front: String(rec.front || "").slice(0, MAX_SHORT_TEXT),
+             topic: rec.topic || "untagged", box: rec.box, due: rec.due };
+  }
+  if (spec.list === "goals") {
+    return { kind: "goal", id: rec.id, title: rec.title, target: rec.target, unit: rec.unit,
+             deadline: rec.deadline || null, done: Boolean(rec.done) };
+  }
+  return { kind: "logbook entry", id: rec.id, date: rec.date, aircraft: rec.aircraft || null,
+           route: rec.route || null, total: rec.total };
+}
+
+/** The narrow mutation each protected action performs. */
+const PROTECTED_APPLY = {
+  update_flashcard: (list, p) =>
+    list.map((c) =>
+      c.id === p.id
+        ? {
+            ...c,
+            ...(p.front !== undefined ? { front: p.front } : {}),
+            ...(p.back !== undefined ? { back: p.back } : {}),
+            ...(p.topic !== undefined ? { topic: p.topic } : {}),
+          }
+        : c
+    ),
+  delete_flashcard: (list, p) => list.filter((c) => c.id !== p.id),
+  update_goal: (list, p) =>
+    list.map((g) =>
+      g.id === p.id
+        ? {
+            ...g,
+            ...(p.title !== undefined ? { title: p.title } : {}),
+            ...(p.target !== undefined ? { target: p.target } : {}),
+            ...(p.deadline !== undefined ? { deadline: p.deadline } : {}),
+            ...(p.done !== undefined ? { done: p.done } : {}),
+          }
+        : g
+    ),
+  delete_goal: (list, p) => list.filter((g) => g.id !== p.id),
+  update_logbook_entry: (list, p) =>
+    list.map((f) =>
+      f.id === p.id
+        ? {
+            ...f,
+            ...(p.total !== undefined ? { total: p.total } : {}),
+            ...(p.route !== undefined ? { route: p.route } : {}),
+            ...(p.aircraft !== undefined ? { aircraft: p.aircraft } : {}),
+            ...(p.remarks !== undefined ? { remarks: p.remarks } : {}),
+          }
+        : f
+    ),
+  delete_logbook_entry: (list, p) => list.filter((f) => f.id !== p.id),
+};
+
+export const CONFLICT = "conflict_detected";
+export const TARGET_MISSING = "target_missing";
+
+/**
+ * Executes an approved protected action. Only the approval manager
+ * should call this, and it revalidates regardless of who does.
+ */
+export function executeProtectedAction(actionName, params, runtime, expectedFingerprint) {
+  const spec = PROTECTED_TARGETS[actionName];
+  const def = REGISTRY.get(actionName);
+  if (!spec || !def || AUTO_EXECUTE.has(def.permission)) {
+    return failure("unknown_action", "Not a protected action.", actionName);
+  }
+  if (typeof runtime.update !== "function") {
+    return failure("unavailable", "No write channel is available.", actionName);
+  }
+
+  const data = runtime.data || {};
+  const current = findTarget(data, spec.list, params.id);
+
+  // 1. does the target still exist?
+  if (!current) {
+    return failure(
+      TARGET_MISSING,
+      "That record no longer exists — it may already have been removed.",
+      actionName
+    );
+  }
+
+  // 2. has it changed materially since the proposal was made?
+  const nowPrint = fingerprintTarget(actionName, data, params.id);
+  if (expectedFingerprint && nowPrint !== expectedFingerprint) {
+    return failure(
+      CONFLICT,
+      "That record changed after the proposal was made, so it was left untouched. Ask again to work from the current version.",
+      actionName
+    );
+  }
+
+  const before = describeTarget(actionName, data, params.id);
+
+  // 3. apply narrowly, with a final guard against the state React
+  //    actually commits to. A mismatch here yields a no-op, never an
+  //    overwrite.
+  let applied = true;
+  runtime.update((d) => {
+    const list = d[spec.list] || [];
+    const live = list.find((r) => r && r.id === params.id);
+    if (!live) {
+      applied = false;
+      return d;
+    }
+    const livePrint = hash(
+      spec.fields.map((f) => `${f}=${JSON.stringify(live[f] ?? null)}`).join("|")
+    );
+    if (expectedFingerprint && livePrint !== expectedFingerprint) {
+      applied = false;
+      return d;
+    }
+    return { ...d, [spec.list]: PROTECTED_APPLY[actionName](list, params) };
+  });
+
+  if (!applied) {
+    return failure(
+      CONFLICT,
+      "That record changed as the action was applied, so it was left untouched.",
+      actionName
+    );
+  }
+
+  return success(actionName, {
+    target: before,
+    applied: actionName.startsWith("delete_") ? "deleted" : "updated",
+  });
+}
+
 /* ---------- registry introspection (safe, no handlers exposed) ---------- */
 export function listActions() {
   return [...REGISTRY.values()].map((a) => ({
