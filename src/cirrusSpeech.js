@@ -53,6 +53,86 @@ export const SPEECH_ERRORS = {
   unknown: "Voice input stopped unexpectedly.",
 };
 
+/* ============================================================
+   CAPTURE REGISTRY
+
+   Everything that could hold the microphone is registered here, so
+   releasing it is one call that cannot miss a path.
+
+   Today the only holder is SpeechRecognition — FlightPlan calls no
+   getUserMedia — but `registerStream` exists so that if any code ever
+   does acquire a MediaStream, its tracks are stopped by the same
+   teardown rather than depending on someone remembering. The sweep is
+   idempotent and safe to call when nothing is open.
+   ============================================================ */
+const liveStreams = new Set();
+const liveRecognizers = new Set();
+
+/** Track any MediaStream so it is released with everything else. */
+export function registerStream(stream) {
+  if (stream && typeof stream.getTracks === "function") liveStreams.add(stream);
+  return stream;
+}
+
+function stopTracks(stream) {
+  if (!stream || typeof stream.getTracks !== "function") return 0;
+  let stopped = 0;
+  for (const track of stream.getTracks()) {
+    try {
+      track.stop(); // the call that actually drops the hardware capture
+      stopped++;
+    } catch {
+      /* already ended */
+    }
+  }
+  return stopped;
+}
+
+function endRecognizer(r) {
+  if (!r) return;
+  // Drop handlers first so a late event from a session we are
+  // abandoning cannot deliver a transcript or move the UI.
+  r.onresult = null;
+  r.onerror = null;
+  r.onend = null;
+  r.onstart = null;
+  r.onaudioend = null;
+  r.onspeechend = null;
+  // stop() then abort(): stop asks for a clean finish, abort guarantees
+  // the session is over. Engines differ about which one frees the audio
+  // session, so both run, and both are allowed to throw harmlessly.
+  try {
+    r.stop();
+  } catch {
+    /* not running */
+  }
+  try {
+    r.abort();
+  } catch {
+    /* already finished */
+  }
+}
+
+/**
+ * Releases every microphone resource this module could be holding.
+ *
+ * Safe to call at any time, from any path — mode change, panel close,
+ * unmount, tab hide, page unload. Returns what it released so a test
+ * can assert the hardware was actually dropped rather than just hidden.
+ */
+export function releaseMicrophone() {
+  let tracks = 0;
+  for (const stream of liveStreams) tracks += stopTracks(stream);
+  liveStreams.clear();
+  const recognizers = liveRecognizers.size;
+  for (const r of liveRecognizers) endRecognizer(r);
+  liveRecognizers.clear();
+  return { tracks, recognizers };
+}
+
+/** For tests and audits: is anything still capturing? */
+export const captureOpen = () => liveStreams.size > 0 || liveRecognizers.size > 0;
+
 /** Feature detection only — this touches no device and prompts nothing. */
 export function speechSupport() {
   if (typeof window === "undefined") return { available: false, reason: "unavailable", Impl: null };
@@ -124,18 +204,11 @@ export function useVoiceInput({ enabled = false, onTranscript } = {}) {
     const r = recognitionRef.current;
     recognitionRef.current = null;
     startingRef.current = false;
-    if (!r) return;
-    // Drop handlers first so a late event from a session we've
-    // abandoned can't deliver a transcript or flip state.
-    r.onresult = null;
-    r.onerror = null;
-    r.onend = null;
-    r.onstart = null;
-    try {
-      r.abort();
-    } catch {
-      /* already finished */
-    }
+    if (r) liveRecognizers.delete(r);
+    endRecognizer(r);
+    // Sweep anything else that could still be capturing, so no path can
+    // leave the hardware open even if a session was started elsewhere.
+    releaseMicrophone();
   }, []);
 
   /** Hard cancel: no transcript is delivered. */
@@ -232,6 +305,11 @@ export function useVoiceInput({ enabled = false, onTranscript } = {}) {
       const code = mapError(event?.error);
       if (code === "denied") deniedRef.current = true;
       clearTimer();
+      // An errored session is finished; make sure it is not left
+      // holding the microphone while we render the message.
+      liveRecognizers.delete(r);
+      endRecognizer(r);
+      if (recognitionRef.current === r) recognitionRef.current = null;
       // "aborted" is our own cancel() and "no-speech" is a normal
       // silent session; neither is worth an error banner.
       if (code === "aborted") return;
@@ -249,6 +327,7 @@ export function useVoiceInput({ enabled = false, onTranscript } = {}) {
 
     r.onend = () => {
       clearTimer();
+      liveRecognizers.delete(r);
       recognitionRef.current = null;
       startingRef.current = false;
       setInterim("");
@@ -277,6 +356,7 @@ export function useVoiceInput({ enabled = false, onTranscript } = {}) {
     }
 
     recognitionRef.current = r;
+    liveRecognizers.add(r);
     timerRef.current = setTimeout(() => {
       try {
         r.stop();
@@ -288,17 +368,50 @@ export function useVoiceInput({ enabled = false, onTranscript } = {}) {
     return { ok: true };
   }, [enabled, support]);
 
-  // Leaving the page, closing the panel, or switching Cirrus off must
-  // release the microphone immediately.
+  /* Every way out of a listening session, all landing on the same
+     teardown:
+
+       - `enabled` going false (mode changed, panel closed)
+       - the component unmounting
+       - the tab being hidden or the page going away
+
+     iOS in particular will not always deliver a clean unload, so
+     pagehide and visibilitychange both matter: without them a
+     backgrounded tab can keep the microphone indicator lit. */
   useEffect(() => teardown, [teardown]);
+
   useEffect(() => {
     if (!enabled) cancel();
   }, [enabled, cancel]);
 
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const release = () => cancel();
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") release();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pagehide", release);
+    window.addEventListener("beforeunload", release);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pagehide", release);
+      window.removeEventListener("beforeunload", release);
+    };
+  }, [cancel]);
+
   const clearError = useCallback(() => setError(null), []);
+
+  /** Synchronous, unconditional release for callers that must not wait
+      for an effect — switching modes, for example. */
+  const release = useCallback(() => {
+    cancel();
+    releaseMicrophone();
+  }, [cancel]);
 
   return {
     supported: support.available,
+    release,
     state,
     listening: state === SPEECH_STATES.LISTENING,
     interim,

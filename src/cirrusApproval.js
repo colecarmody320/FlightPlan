@@ -154,6 +154,75 @@ export function interpretApproval(text) {
 }
 
 /* ============================================================
+   COMPLETION-CLAIM GUARD
+
+   The rule this enforces: a change is real only when trusted code has
+   a confirmed result for it. Prose is never evidence.
+
+   Cirrus is instructed to phrase proposals in the future tense, but an
+   instruction is not a guarantee — a model can always emit "Moved it to
+   3pm" with no action attached, and if the UI relays that unchallenged
+   the user is simply lied to. So the frontend, which alone knows
+   whether anything actually executed, checks for a completion claim and
+   contradicts it in place.
+
+   The check is deliberately narrow: a first-person past-tense claim
+   about a record-changing verb. "You added three cards this week" is a
+   statement about the user's history, not a claim of action, and is
+   left alone.
+   ============================================================ */
+
+/** First person, past tense, about something that would change data. */
+const CLAIM_PATTERNS = [
+  /\b(?:i(?:'ve| have)?\s+)?(?:just\s+)?(?:added|created|scheduled|booked|set up|put)\b/i,
+  /\b(?:i(?:'ve| have)?\s+)?(?:just\s+)?(?:moved|rescheduled|changed|updated|edited|shifted)\b/i,
+  /\b(?:i(?:'ve| have)?\s+)?(?:just\s+)?(?:deleted|removed|cancelled|canceled|cleared)\b/i,
+  /\b(?:done|all set|that's done|taken care of)\b/i,
+];
+
+/** Things a claim has to be *about* before we treat it as a claim. */
+const CLAIM_OBJECTS =
+  /\b(event|calendar|appointment|meeting|session|card|flashcard|goal|entry|flight|reminder|it|that)\b/i;
+
+/**
+ * Does this reply assert that something was already changed?
+ *
+ * Used only to decide whether a correction is needed when nothing
+ * actually ran. A false negative costs nothing extra — the reply simply
+ * stands with no outcome line, as it would anyway.
+ */
+export function claimsCompletion(text) {
+  const s = String(text || "");
+  if (!s.trim()) return false;
+  // A question is never a claim: "Shall I move it to 3pm?"
+  if (/\?\s*$/.test(s.trim())) return false;
+  // Explicitly future or conditional phrasing is a proposal, not a claim.
+  if (/\b(would|will|shall|going to|i'll|do you want|should i)\b/i.test(s)) return false;
+  if (!CLAIM_OBJECTS.test(s)) return false;
+  return CLAIM_PATTERNS.some((re) => re.test(s));
+}
+
+export const NO_ACTION_CHANNEL_NOTE =
+  "Correction: nothing was actually changed. This copy of FlightPlan is talking to a version of the Cirrus backend that cannot perform actions, so I can only describe things, not do them. The cirrus-chat function needs redeploying.";
+
+export const NOTHING_RAN_NOTE =
+  "Correction: nothing was actually changed — I described that rather than doing it. Ask me again if you want me to make the change.";
+
+/**
+ * The line to append after a reply, or null if the reply can stand.
+ *
+ * `executed` is whatever trusted code actually did: null when no action
+ * was attempted at all.
+ */
+export function verifyClaim({ reply, action, executed, actionChannel = true } = {}) {
+  // Something really ran, or is really waiting for approval. The reply
+  // is accompanied by a real outcome, so it needs no correction.
+  if (executed || action) return null;
+  if (!claimsCompletion(reply)) return null;
+  return actionChannel ? NOTHING_RAN_NOTE : NO_ACTION_CHANNEL_NOTE;
+}
+
+/* ============================================================
    UTTERANCE ROUTING
 
    Where a message goes is decided here, once, for typed text and
@@ -226,7 +295,10 @@ function view(p, now = Date.now()) {
     createdAt: p.createdAt,
     expiresAt: p.expiresAt,
     secondsRemaining: Math.max(0, Math.round((Date.parse(p.expiresAt) - now) / 1000)),
-    proposal: p.proposal,
+    // `resolved` carries the provider identifiers execution needs; it is
+    // machinery, not something the UI should render, so it stays out of
+    // the view alongside the raw parameters.
+    proposal: p.proposal ? { ...p.proposal, resolved: undefined } : p.proposal,
     status: p.status,
   };
 }
@@ -264,10 +336,10 @@ export function createApprovalManager({ history = null } = {}) {
    * Route a structured intent. READ and CREATE execute immediately via
    * Stage 5. EDIT and DELETE become a pending transaction instead.
    */
-  function propose(intent, runtime = {}) {
+  async function propose(intent, runtime = {}) {
     clearExpired();
 
-    const result = executeCirrusAction(intent, { ...runtime, history });
+    const result = await executeCirrusAction(intent, { ...runtime, history });
     if (result.status !== "approval_required") return result;
 
     // Refuse to silently replace an existing pending action. The user
@@ -285,10 +357,21 @@ export function createApprovalManager({ history = null } = {}) {
     const params = intent?.parameters || {};
     const targetId = typeof params.id === "string" ? params.id : null;
 
-    // Fingerprint the target as it stands now, so we can tell at
-    // approval time whether it changed underneath us.
-    const fingerprint = targetId ? fingerprintTarget(name, runtime.data || {}, targetId) : null;
-    if (targetId && !fingerprint) {
+    /* Fingerprint the target as it stands now, so we can tell at
+       approval time whether it changed underneath us.
+
+       A record stored in FlightPlan is fingerprinted from the local
+       blob. A record stored in a provider — a Google Calendar event —
+       has already been identified and fingerprinted by the action's own
+       proposal, which is the only code that knows how to read it. Both
+       end up in the same place and are checked the same way. */
+    const remote = result.proposal?.resolved || null;
+    const fingerprint = remote
+      ? remote.fingerprint || null
+      : targetId
+      ? fingerprintTarget(name, runtime.data || {}, targetId)
+      : null;
+    if (!remote && targetId && !fingerprint) {
       return { status: "error", code: "target_missing", action: name, message: "That record no longer exists." };
     }
 
@@ -301,6 +384,10 @@ export function createApprovalManager({ history = null } = {}) {
       parameters: params,
       fingerprint,
       targetId,
+      // Identifiers the proposal resolved (which calendar, which event).
+      // Kept so execution acts on exactly what was shown to the user and
+      // never re-runs a search that could land somewhere else.
+      resolved: remote,
       proposal: result.proposal,
       createdAt: new Date(now).toISOString(),
       expiresAt: new Date(now + APPROVAL_WINDOW_MS).toISOString(),
@@ -326,7 +413,7 @@ export function createApprovalManager({ history = null } = {}) {
    * explicit { decision: "approve" | "reject" } from a button. Both
    * paths run the same rules; the button simply skips interpretation.
    */
-  function resolve(input, runtime = {}) {
+  async function resolve(input, runtime = {}) {
     clearExpired();
 
     if (!pending) {
@@ -384,7 +471,11 @@ export function createApprovalManager({ history = null } = {}) {
       summary: "approved by user",
     });
 
-    const result = executeProtectedAction(p.action, p.parameters, runtime, p.fingerprint);
+    /* Note the ordering above: `pending` was cleared synchronously,
+       before this await. A second approval arriving while the provider
+       round trip is in flight therefore finds nothing pending and
+       cannot run the action a second time. */
+    const result = await executeProtectedAction(p.action, p.parameters, runtime, p.fingerprint, p.resolved);
 
     if (result.status === "success") {
       note({
@@ -445,7 +536,8 @@ export function describeProposal(pendingView, data) {
 
   // Re-read the target so the preview reflects current state, not the
   // state at proposal time.
-  const live = proposal?.target?.id ? describeTarget(action, data || {}, proposal.target.id) : null;
+  const isRemote = proposal?.target?.kind === "google event";
+  const live = !isRemote && proposal?.target?.id ? describeTarget(action, data || {}, proposal.target.id) : null;
   const target = live || proposal?.target || null;
 
   const label = target
@@ -453,6 +545,8 @@ export function describeProposal(pendingView, data) {
       ? `Flashcard: "${target.front}"${target.topic ? ` (${target.topic})` : ""}`
       : target.kind === "goal"
       ? `Goal: "${target.title}"`
+      : target.kind === "google event"
+      ? `${target.title} · ${target.date}${target.when && target.when !== "—" ? ` · ${target.when}` : ""}`
       : `Logbook entry: ${target.date}${target.aircraft ? ` · ${target.aircraft}` : ""}`
     : action;
 
@@ -471,6 +565,10 @@ export function describeProposal(pendingView, data) {
     changes,
     effect: proposal?.effect || null,
     caution: proposal?.caution || null,
-    targetStillExists: Boolean(live),
+    // A remote record can't be re-read synchronously here; it is
+    // revalidated against the provider at execution time instead, which
+    // is where a change would actually matter.
+    targetStillExists: isRemote ? true : Boolean(live),
+    remote: isRemote,
   };
 }

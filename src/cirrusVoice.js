@@ -36,6 +36,7 @@ export const TTS_ERRORS = {
   provider_timeout: "Cirrus's voice took too long to respond.",
   bad_request: "That reply couldn't be spoken.",
   network_error: "Couldn't reach Cirrus's voice.",
+  not_deployed: "Cirrus's voice function isn't deployed yet.",
   playback_blocked: "Your browser blocked audio playback.",
   empty_audio: "No audio came back.",
   unknown: "Cirrus couldn't speak that.",
@@ -87,8 +88,12 @@ export async function fetchSpeech(text) {
       }
       if (ctx.status === 401) return { ok: false, code: "unauthenticated" };
       if (ctx.status === 429) return { ok: false, code: "rate_limited" };
-      if (ctx.status >= 500) return { ok: false, code: "provider_error" };
-      return { ok: false, code: "bad_request" };
+      // A missing function is a deployment problem, not a provider one.
+      // Saying "ElevenLabs is unavailable" when cirrus-speak was never
+      // deployed sends the search in exactly the wrong direction.
+      if (ctx.status === 404) return { ok: false, code: "not_deployed", detail: `HTTP 404 from ${FN}` };
+      if (ctx.status >= 500) return { ok: false, code: "provider_error", detail: `HTTP ${ctx.status}` };
+      return { ok: false, code: "bad_request", detail: `HTTP ${ctx.status}` };
     }
     return { ok: false, code: "network_error", detail: res.error?.message };
   }
@@ -99,6 +104,41 @@ export async function fetchSpeech(text) {
   const raw = res.data;
   if (!(raw instanceof Blob) || raw.size === 0) return { ok: false, code: "empty_audio" };
   return { ok: true, blob: new Blob([raw], { type: "audio/mpeg" }) };
+}
+
+/**
+ * Asks the Edge Function to check its own ElevenLabs configuration.
+ *
+ * Returns findings, never secrets: which secrets are set, which models
+ * the account can actually use, and whether the configured one is among
+ * them. Exists because the alternative is guessing at ElevenLabs from
+ * the outside, and because there is no console to read on an iPad.
+ */
+export async function diagnoseVoice() {
+  const { data: session } = await supabase.auth.getSession();
+  if (!session?.session) return { ok: false, code: "unauthenticated" };
+  let res;
+  try {
+    res = await supabase.functions.invoke(`${FN}?action=diagnose`, { body: {} });
+  } catch (err) {
+    return { ok: false, code: "network_error", detail: err?.message };
+  }
+  if (res.error) {
+    const ctx = res.error?.context;
+    if (ctx?.status === 404) {
+      return { ok: false, code: "not_deployed", detail: `${FN} is not deployed (HTTP 404).` };
+    }
+    if (ctx && typeof ctx.json === "function") {
+      try {
+        const b = await ctx.json();
+        if (b?.error?.code) return { ok: false, code: b.error.code, detail: b.error.message };
+      } catch {
+        /* fall through */
+      }
+    }
+    return { ok: false, code: "unknown", detail: res.error?.message };
+  }
+  return { ok: true, report: res.data };
 }
 
 /**
@@ -190,7 +230,16 @@ export function useCirrusVoice({ enabled = true } = {}) {
 
       const result = await fetchSpeech(text);
       if (!result.ok) {
-        if (turn === turnRef.current) setError({ code: result.code, message: TTS_ERRORS[result.code] || TTS_ERRORS.unknown });
+        if (turn === turnRef.current) {
+          setError({
+            code: result.code,
+            message: TTS_ERRORS[result.code] || TTS_ERRORS.unknown,
+            // The provider's own words. Dropping these is what turns a
+            // five-minute fix into a debugging session — there is no
+            // console to check on an iPad.
+            detail: result.detail || null,
+          });
+        }
         return result;
       }
       // The turn was cancelled while we were synthesising.

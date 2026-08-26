@@ -145,6 +145,70 @@ async function providerDetail(res: Response): Promise<string> {
   }
 }
 
+
+/* ============================================================
+   MODEL RESOLUTION
+
+   Model names are the provider's to change, not ours to memorise. A
+   hardcoded default is a guess that goes stale silently, and that has
+   already cost this project a debugging session once with Gemini.
+
+   So the function asks the account which models it can actually use,
+   and picks one:
+     - the configured ELEVENLABS_MODEL_ID, if the account has it
+     - otherwise a text-to-speech model the account does have
+   The substitution is reported in logs and diagnostics, so a wrong
+   ELEVENLABS_MODEL_ID becomes a visible note rather than a failure.
+
+   Cached per instance for ten minutes: this is one extra request on a
+   cold start, not one per utterance.
+   ============================================================ */
+let modelCache: { ids: string[]; at: number } | null = null;
+const MODEL_CACHE_MS = 10 * 60_000;
+
+async function accountModels(key: string): Promise<string[] | null> {
+  if (modelCache && Date.now() - modelCache.at < MODEL_CACHE_MS) return modelCache.ids;
+  try {
+    const r = await timedFetch("https://api.elevenlabs.io/v1/models", {
+      headers: { "xi-api-key": key },
+    });
+    if (!r.ok) return null;
+    const list = await r.json();
+    const ids: string[] = (Array.isArray(list) ? list : [])
+      .filter((m: any) => m?.can_do_text_to_speech !== false)
+      .map((m: any) => m?.model_id)
+      .filter((id: unknown): id is string => typeof id === "string" && id.length > 0);
+    if (!ids.length) return null;
+    modelCache = { ids, at: Date.now() };
+    return ids;
+  } catch {
+    return null;
+  }
+}
+
+type ModelChoice = { model: string; verified: boolean; substituted: boolean; configured: string | null };
+
+async function chooseModel(key: string): Promise<ModelChoice> {
+  const configured = envStr("ELEVENLABS_MODEL_ID") || null;
+  const wanted = configured || DEFAULT_MODEL_ID;
+  const ids = await accountModels(key);
+
+  // Could not ask — proceed with what we have rather than refusing to
+  // speak. If it is wrong, the provider's own message says so.
+  if (!ids) return { model: wanted, verified: false, substituted: false, configured };
+
+  if (ids.includes(wanted)) return { model: wanted, verified: true, substituted: false, configured };
+
+  // Prefer low latency for a conversational assistant, then quality,
+  // then simply something that works.
+  const pick =
+    ids.find((i) => /flash/i.test(i)) ||
+    ids.find((i) => /turbo/i.test(i)) ||
+    ids.find((i) => /multilingual/i.test(i)) ||
+    ids[0];
+  return { model: pick, verified: true, substituted: true, configured };
+}
+
 Deno.serve(async (req: Request) => {
   const origin = req.headers.get("origin");
   const started = Date.now();
@@ -198,6 +262,73 @@ Deno.serve(async (req: Request) => {
     return errorResponse("rate_limited", "Too much speech in a short window.", 429, origin);
   }
 
+  /* --- diagnostics ---
+     Answers "why is the voice failing?" without ever returning a
+     secret. It reports whether each secret is present, which models
+     this ElevenLabs account can actually use, and whether the
+     configured model is one of them. The key is never echoed; the
+     voice id is reduced to a fingerprint so it can be told apart from
+     a different one without being disclosed. */
+  if (new URL(req.url).searchParams.get("action") === "diagnose") {
+    const key = envStr("ELEVENLABS_API_KEY");
+    const voice = envStr("ELEVENLABS_VOICE_ID");
+    const configuredModel = envStr("ELEVENLABS_MODEL_ID") || DEFAULT_MODEL_ID;
+    const resolved = key ? await chooseModel(key) : null;
+    const out: Record<string, unknown> = {
+      hasApiKey: Boolean(key),
+      hasVoiceId: Boolean(voice),
+      voiceIdFingerprint: voice ? `…${voice.slice(-4)} (${voice.length} chars)` : null,
+      configuredModel,
+      usingDefaultModel: !envStr("ELEVENLABS_MODEL_ID"),
+      modelActuallyUsed: resolved?.model ?? null,
+      modelWasSubstituted: resolved?.substituted ?? null,
+    };
+    if (!key) {
+      out.problem = "ELEVENLABS_API_KEY is not set on this function.";
+      return json(out, 200, origin);
+    }
+
+    try {
+      const mr = await timedFetch("https://api.elevenlabs.io/v1/models", {
+        headers: { "xi-api-key": key },
+      });
+      out.modelsStatus = mr.status;
+      if (mr.ok) {
+        const models = await mr.json();
+        const usable = (Array.isArray(models) ? models : [])
+          .filter((m: any) => m?.can_do_text_to_speech !== false)
+          .map((m: any) => m?.model_id)
+          .filter(Boolean);
+        out.availableTextToSpeechModels = usable;
+        out.configuredModelIsAvailable = usable.includes(configuredModel);
+        if (!usable.includes(configuredModel)) {
+          out.problem = `ELEVENLABS_MODEL_ID "${configuredModel}" is not one this account can use. Set it to one of availableTextToSpeechModels.`;
+        }
+      } else {
+        out.problem = `ElevenLabs rejected the key: ${await providerDetail2(mr)}`;
+      }
+    } catch (err) {
+      out.problem = `Could not reach ElevenLabs: ${(err as Error)?.message || "network error"}`;
+    }
+
+    if (voice) {
+      try {
+        const vr = await timedFetch(
+          `https://api.elevenlabs.io/v1/voices/${encodeURIComponent(voice)}`,
+          { headers: { "xi-api-key": key } },
+        );
+        out.voiceStatus = vr.status;
+        out.voiceIdIsValid = vr.ok;
+        if (!vr.ok) out.problem = `ELEVENLABS_VOICE_ID is not usable: ${await providerDetail2(vr)}`;
+      } catch {
+        out.voiceIdIsValid = null;
+      }
+    }
+
+    log("diagnose", { user: userTag(user.id), hasKey: Boolean(key), hasVoice: Boolean(voice) });
+    return json(out, 200, origin);
+  }
+
   /* --- parse --- */
   let text: string;
   try {
@@ -230,8 +361,12 @@ Deno.serve(async (req: Request) => {
     return errorResponse("server_misconfigured", "Cirrus's voice is not configured", 500, origin);
   }
 
-  const modelId = envStr("ELEVENLABS_MODEL_ID") || DEFAULT_MODEL_ID;
+  const choice = await chooseModel(apiKey);
+  const modelId = choice.model;
   const outputFormat = envStr("ELEVENLABS_OUTPUT_FORMAT") || DEFAULT_OUTPUT_FORMAT;
+  if (choice.substituted) {
+    log("model_substituted", { configured: choice.configured, using: modelId });
+  }
   const url =
     `${ELEVENLABS_ENDPOINT}/${encodeURIComponent(voiceId)}` +
     `?output_format=${encodeURIComponent(outputFormat)}`;
@@ -283,7 +418,7 @@ Deno.serve(async (req: Request) => {
     }
     return errorResponse(
       "provider_error",
-      `ElevenLabs returned ${res.status}: ${detail}`,
+      `ElevenLabs returned ${res.status} (model ${modelId}): ${detail}`,
       502,
       origin,
     );
@@ -299,7 +434,9 @@ Deno.serve(async (req: Request) => {
     user: userTag(user.id),
     chars: text.length,
     bytes: audio.byteLength,
+    contentType: res.headers.get("content-type"),
     modelId,
+    modelVerified: choice.verified,
     ms: Date.now() - started,
   });
 

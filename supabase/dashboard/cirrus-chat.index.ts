@@ -19,7 +19,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.112.4";
 /* ---------- limits ---------- */
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_MESSAGE_CHARS = 4000;
-const MAX_SYSTEM_PROMPT_CHARS = 8000;
+const MAX_SYSTEM_PROMPT_CHARS = 24000; // personality + action catalogue + read-only app context
 const MAX_HISTORY_MESSAGES = 20;
 const MAX_HISTORY_CHARS = 12000;
 const MAX_REPLY_CHARS = 8000;
@@ -477,6 +477,48 @@ function log(event: string, fields: Record<string, unknown>) {
 
 const userTag = (id: string) => id.slice(0, 8);
 
+
+/* ============================================================
+   ACTION EXTRACTION
+
+   Cirrus may end a reply with one fenced \u0060cirrus-action\u0060 block. This
+   pulls it out, strips it from the text the user sees, and returns it
+   separately.
+
+   Nothing here decides anything. It does not know what actions exist,
+   what they cost, or whether one needs approval — that is the browser's
+   action registry, which validates the name, the parameters and the
+   permission before anything runs. This function's only job is to stop
+   raw JSON being shown to the user, and to refuse obvious junk early.
+   ============================================================ */
+const ACTION_FENCE = /```cirrus-action\s*([\s\S]*?)```/i;
+const MAX_ACTION_CHARS = 4000;
+
+function extractAction(reply: string): { text: string; action: unknown | null } {
+  const match = reply.match(ACTION_FENCE);
+  if (!match) return { text: reply, action: null };
+
+  // Remove the block whether or not the JSON inside turns out to parse:
+  // a malformed block is still not something to show the user.
+  const text = reply.replace(ACTION_FENCE, "").trim();
+  const raw = (match[1] || "").trim();
+  if (!raw || raw.length > MAX_ACTION_CHARS) return { text, action: null };
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    log("action_unparsable", { chars: raw.length });
+    return { text, action: null };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { text, action: null };
+  if (typeof parsed.action !== "string" || !parsed.action) return { text, action: null };
+  if (parsed.parameters !== undefined && (typeof parsed.parameters !== "object" || parsed.parameters === null || Array.isArray(parsed.parameters))) {
+    return { text, action: null };
+  }
+  return { text, action: { action: parsed.action.slice(0, 64), parameters: parsed.parameters ?? {} } };
+}
+
 /* ---------- main handler ---------- */
 Deno.serve(async (req: Request) => {
   const origin = req.headers.get("origin");
@@ -585,8 +627,10 @@ Deno.serve(async (req: Request) => {
         timeoutMs,
       });
 
-      const reply = result.reply.slice(0, MAX_REPLY_CHARS);
+      const extracted = extractAction(result.reply);
+      const reply = extracted.text.slice(0, MAX_REPLY_CHARS);
       log("ok", {
+        actionProposed: extracted.action ? (extracted.action as any).action : null,
         user: userTag(user.id),
         provider: provider.name,
         model: result.model,
@@ -601,9 +645,20 @@ Deno.serve(async (req: Request) => {
       return jsonResponse(
         {
           reply,
+          /* Declares that this deployment understands the action
+             protocol. A client that does not see this marker knows the
+             function predates it and that no action can possibly have
+             run — which is the difference between "nothing happened"
+             and "something happened and I wasn't told". */
+          contract: "cirrus-action-v1",
+          // Present only when Cirrus proposed something. It is an
+          // unvalidated suggestion at this point: the browser's action
+          // registry decides whether it exists, whether its parameters
+          // are acceptable, and whether it needs approval.
+          ...(extracted.action ? { action: extracted.action } : {}),
           model: result.model,
           provider: provider.name,
-          truncated: result.reply.length > MAX_REPLY_CHARS,
+          truncated: extracted.text.length > MAX_REPLY_CHARS,
         },
         200,
         origin,

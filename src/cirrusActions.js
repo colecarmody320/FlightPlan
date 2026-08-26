@@ -8,6 +8,15 @@ import {
   weatherContext,
   NOT_IMPLEMENTED,
 } from "./cirrusContext.js";
+import {
+  resolveDate,
+  isHHMM,
+  findEventCandidates,
+  CANDIDATE_RESULTS,
+  describeEvent,
+  formatWhen,
+  fingerprintGoogleEvent,
+} from "./calendarActions.js";
 
 /* ============================================================
    CIRRUS — STRUCTURED ACTION ENGINE (Stage 5)
@@ -702,6 +711,384 @@ define("delete_logbook_entry", {
   },
 });
 
+
+/* ============================================================
+   GOOGLE CALENDAR ACTIONS
+
+   These are the first actions whose record does not live in
+   flightplan_data. The permission classification is unchanged by that:
+   creating is automatic, changing and removing are protected and go
+   through Stage 6 exactly as a flashcard does.
+
+   The Google client arrives on the runtime rather than being imported,
+   the same dependency-injection pattern the rest of Cirrus uses for
+   app helpers. It keeps this module free of network code and lets the
+   tests drive a fake provider.
+
+   THE MODEL NEVER SUPPLIES AN IDENTIFIER IT INVENTED. It may describe
+   an event in words; identification happens here against the calendar
+   already in memory, and only a single unambiguous candidate is ever
+   acted on.
+   ============================================================ */
+
+const googleReady = (rt) => {
+  const g = rt?.google;
+  if (!g || typeof g.createEvent !== "function") {
+    return failure("unavailable", "Google Calendar isn't available right now.");
+  }
+  if (!g.connected) {
+    return failure("not_connected", "Google Calendar isn't connected. Connect it on the Calendar tab first.");
+  }
+  return null;
+};
+
+/**
+ * Which calendar a new event belongs in.
+ *
+ * Silence is not a default. If several calendars are in play and the
+ * request didn't name one, this asks rather than picking — writing to
+ * the wrong calendar is quiet and annoying to undo.
+ */
+function chooseCalendar(p, g) {
+  const selected = Array.isArray(g.selected) ? g.selected : [];
+  if (p.calendarId) {
+    if (selected.length && !selected.includes(p.calendarId)) {
+      return { error: "That calendar isn't one of the ones you've selected in FlightPlan." };
+    }
+    return { calendarId: p.calendarId };
+  }
+  // No explicit selection means FlightPlan is already reading only the
+  // primary calendar, so primary is the unambiguous destination.
+  if (!selected.length) return { calendarId: "primary" };
+  if (selected.length === 1) return { calendarId: selected[0] };
+
+  const names = (g.calendars || [])
+    .filter((c) => selected.includes(c.id))
+    .map((c) => c.name)
+    .slice(0, 6);
+  return {
+    error: `You have ${selected.length} calendars connected${names.length ? ` (${names.join(", ")})` : ""}. Which one should this go on?`,
+  };
+}
+
+/** Shared identification for the two protected Google actions. */
+function identify(p, rt) {
+  const g = rt.google;
+  const today = rt.helpers?.todayISO ? rt.helpers.todayISO() : new Date().toISOString().slice(0, 10);
+
+  let date = null;
+  if (p.date !== undefined) {
+    const r = resolveDate(p.date, today);
+    if (!r.ok) return { error: r.reason };
+    date = r.date;
+  }
+
+  const found = findEventCandidates(g.events || [], {
+    query: p.query,
+    date,
+    eventId: p.eventId,
+    calendarId: p.calendarId,
+  });
+
+  if (found.result === CANDIDATE_RESULTS.NONE) {
+    return {
+      error: `I couldn't find ${p.query ? `an event matching "${String(p.query).slice(0, 60)}"` : "that event"}${date ? ` on ${date}` : ""} in your Google calendar.`,
+    };
+  }
+  if (found.result === CANDIDATE_RESULTS.MANY) {
+    const list = found.candidates.map((e) => `${describeEvent(e)}`).join("; ");
+    return { error: `I found more than one match — ${list}. Which one do you mean?` };
+  }
+  return { event: found.event };
+}
+
+define("create_google_calendar_event", {
+  permission: PERMISSIONS.CREATE,
+  description: "Add an event to Google Calendar.",
+  schema: {
+    title: { type: "string", required: true, maxLength: MAX_SHORT_TEXT },
+    date: { type: "string", required: true, maxLength: 32 },
+    start: { type: "string", maxLength: 5 },
+    end: { type: "string", maxLength: 5 },
+    allDay: { type: "boolean" },
+    calendarId: { type: "string", maxLength: 300 },
+    description: { type: "string", maxLength: MAX_TEXT, allowEmpty: true },
+    location: { type: "string", maxLength: MAX_SHORT_TEXT },
+  },
+  handler: async (p, rt) => {
+    const blocked = googleReady(rt);
+    if (blocked) return blocked;
+    const g = rt.google;
+
+    const today = rt.helpers?.todayISO ? rt.helpers.todayISO() : new Date().toISOString().slice(0, 10);
+    const when = resolveDate(p.date, today);
+    if (!when.ok) return failure("ambiguous", when.reason, "create_google_calendar_event");
+
+    const allDay = p.allDay === true;
+    if (!allDay) {
+      // Rather than inventing a duration, say what's missing.
+      if (!isHHMM(p.start) || !isHHMM(p.end)) {
+        return failure(
+          "ambiguous",
+          "I need a start and end time in HH:MM, or tell me it's an all-day event.",
+          "create_google_calendar_event"
+        );
+      }
+      if (p.end <= p.start) {
+        return failure("invalid_parameters", "The end time has to be after the start time.", "create_google_calendar_event");
+      }
+    }
+
+    const dest = chooseCalendar(p, g);
+    if (dest.error) return failure("ambiguous", dest.error, "create_google_calendar_event");
+
+    const res = await g.createEvent({
+      calendarId: dest.calendarId,
+      title: p.title,
+      date: when.date,
+      start: allDay ? undefined : p.start,
+      end: allDay ? undefined : p.end,
+      allDay,
+      timeZone: g.timeZone,
+      description: p.description,
+      location: p.location,
+    });
+
+    if (!res.ok) {
+      // A refusal from Google is reported as a refusal. Nothing local is
+      // written to make it look as though it worked.
+      return failure(res.code || "provider_error", res.detail || "Google didn't accept that event.", "create_google_calendar_event");
+    }
+
+    g.invalidate?.();
+    const ev = res.data?.event || {};
+    return success("create_google_calendar_event", {
+      eventId: ev.eventId,
+      title: ev.title,
+      date: ev.date,
+      when: formatWhen(ev),
+      calendarId: dest.calendarId,
+    });
+  },
+});
+
+define("update_google_calendar_event", {
+  permission: PERMISSIONS.EDIT,
+  description: "Change the time, title or place of a Google Calendar event.",
+  schema: {
+    query: { type: "string", maxLength: MAX_SHORT_TEXT },
+    eventId: { type: "string", maxLength: 300 },
+    calendarId: { type: "string", maxLength: 300 },
+    date: { type: "string", maxLength: 32 },
+    title: { type: "string", maxLength: MAX_SHORT_TEXT },
+    newDate: { type: "string", maxLength: 32 },
+    start: { type: "string", maxLength: 5 },
+    end: { type: "string", maxLength: 5 },
+    location: { type: "string", maxLength: MAX_SHORT_TEXT },
+  },
+  proposal: (p, rt) => {
+    const blocked = googleReady(rt);
+    if (blocked) return { error: blocked.message };
+    const found = identify(p, rt);
+    if (found.error) return { error: found.error };
+    const ev = found.event;
+
+    const today = rt.helpers?.todayISO ? rt.helpers.todayISO() : new Date().toISOString().slice(0, 10);
+    const changes = {};
+    if (p.title !== undefined) changes.title = p.title;
+    if (p.location !== undefined) changes.location = p.location;
+    if (p.newDate !== undefined) {
+      const r = resolveDate(p.newDate, today);
+      if (!r.ok) return { error: r.reason };
+      changes.date = r.date;
+    }
+    if (p.start !== undefined) {
+      if (!isHHMM(p.start)) return { error: "The new start time has to be HH:MM." };
+      changes.start = p.start;
+    }
+    if (p.end !== undefined) {
+      if (!isHHMM(p.end)) return { error: "The new end time has to be HH:MM." };
+      changes.end = p.end;
+    }
+    if (changes.start && changes.end && changes.end <= changes.start) {
+      return { error: "The end time has to be after the start time." };
+    }
+    // A one-sided time change still has to make sense against the other
+    // side as it currently stands.
+    const finalStart = changes.start ?? ev.start;
+    const finalEnd = changes.end ?? ev.end;
+    if (finalStart && finalEnd && finalEnd <= finalStart) {
+      return { error: `That would end at or before it starts (currently ${formatWhen(ev)}).` };
+    }
+    if (!Object.keys(changes).length) return { error: "No changes were specified." };
+
+    return {
+      target: {
+        kind: "google event",
+        id: ev.externalId,
+        title: ev.title,
+        date: ev.date,
+        start: ev.start,
+        end: ev.end,
+        allDay: ev.allDay,
+        location: ev.location || null,
+        when: formatWhen(ev),
+      },
+      changes,
+      caution: "This changes the event in Google Calendar, not just in FlightPlan.",
+      resolved: {
+        calendarId: ev.sourceCalendarId,
+        eventId: ev.externalId,
+        fingerprint: fingerprintGoogleEvent(ev),
+        changes,
+      },
+    };
+  },
+});
+
+define("delete_google_calendar_event", {
+  permission: PERMISSIONS.DELETE,
+  description: "Remove an event from Google Calendar.",
+  schema: {
+    query: { type: "string", maxLength: MAX_SHORT_TEXT },
+    eventId: { type: "string", maxLength: 300 },
+    calendarId: { type: "string", maxLength: 300 },
+    date: { type: "string", maxLength: 32 },
+  },
+  proposal: (p, rt) => {
+    const blocked = googleReady(rt);
+    if (blocked) return { error: blocked.message };
+    const found = identify(p, rt);
+    if (found.error) return { error: found.error };
+    const ev = found.event;
+    return {
+      target: {
+        kind: "google event",
+        id: ev.externalId,
+        title: ev.title,
+        date: ev.date,
+        start: ev.start,
+        end: ev.end,
+        allDay: ev.allDay,
+        when: formatWhen(ev),
+      },
+      effect: "The event would be removed from Google Calendar.",
+      caution: "This removes it everywhere Google Calendar syncs, not just in FlightPlan.",
+      resolved: {
+        calendarId: ev.sourceCalendarId,
+        eventId: ev.externalId,
+        fingerprint: fingerprintGoogleEvent(ev),
+      },
+    };
+  },
+});
+
+/* ============================================================
+   REMOTE PROTECTED EXECUTION
+
+   Runs only after a real approval, and revalidates against Google
+   rather than trusting the snapshot the proposal was built from:
+
+     1. re-read the event now
+     2. gone            -> target_missing, nothing attempted
+     3. materially different -> conflict, nothing attempted
+     4. otherwise mutate, passing the etag from that fresh read so
+        Google itself refuses the write if it changed in between
+
+   Every failure leaves Google untouched and reports the failure. The
+   cached FlightPlan view is never edited to paper over a rejection.
+   ============================================================ */
+const REMOTE_PROTECTED = {
+  async update_google_calendar_event(_params, runtime, expectedFingerprint, resolved) {
+    const g = runtime?.google;
+    if (!g || typeof g.updateEvent !== "function") {
+      return failure("unavailable", "Google Calendar isn't available right now.", "update_google_calendar_event");
+    }
+    if (!resolved?.eventId || !resolved?.calendarId) {
+      return failure("target_missing", "That event could no longer be identified.", "update_google_calendar_event");
+    }
+
+    const live = await g.getEvent({ calendarId: resolved.calendarId, eventId: resolved.eventId });
+    if (!live.ok) {
+      if (live.code === "not_found") {
+        return failure(TARGET_MISSING, "That event no longer exists in Google Calendar.", "update_google_calendar_event");
+      }
+      return failure(live.code || "provider_error", live.detail || "Couldn't re-read that event.", "update_google_calendar_event");
+    }
+
+    const current = live.data?.event || {};
+    if (expectedFingerprint && fingerprintGoogleEvent(current) !== expectedFingerprint) {
+      return failure(
+        CONFLICT,
+        "That event changed in Google after the proposal was made, so it was left untouched. Ask again to work from the current version.",
+        "update_google_calendar_event"
+      );
+    }
+
+    const res = await g.updateEvent({
+      calendarId: resolved.calendarId,
+      eventId: resolved.eventId,
+      etag: current.etag,
+      changes: resolved.changes || {},
+      timeZone: g.timeZone,
+    });
+    if (!res.ok) {
+      const code = res.code === "conflict" ? CONFLICT : res.code === "not_found" ? TARGET_MISSING : res.code || "provider_error";
+      return failure(code, res.detail || "Google didn't accept that change.", "update_google_calendar_event");
+    }
+
+    g.invalidate?.();
+    const ev = res.data?.event || {};
+    return success("update_google_calendar_event", {
+      target: { kind: "google event", id: resolved.eventId, title: ev.title, date: ev.date, when: formatWhen(ev) },
+      applied: "updated",
+    });
+  },
+
+  async delete_google_calendar_event(_params, runtime, expectedFingerprint, resolved) {
+    const g = runtime?.google;
+    if (!g || typeof g.deleteEvent !== "function") {
+      return failure("unavailable", "Google Calendar isn't available right now.", "delete_google_calendar_event");
+    }
+    if (!resolved?.eventId || !resolved?.calendarId) {
+      return failure("target_missing", "That event could no longer be identified.", "delete_google_calendar_event");
+    }
+
+    const live = await g.getEvent({ calendarId: resolved.calendarId, eventId: resolved.eventId });
+    if (!live.ok) {
+      if (live.code === "not_found") {
+        return failure(TARGET_MISSING, "That event no longer exists in Google Calendar.", "delete_google_calendar_event");
+      }
+      return failure(live.code || "provider_error", live.detail || "Couldn't re-read that event.", "delete_google_calendar_event");
+    }
+
+    const current = live.data?.event || {};
+    if (expectedFingerprint && fingerprintGoogleEvent(current) !== expectedFingerprint) {
+      return failure(
+        CONFLICT,
+        "That event changed in Google after the proposal was made, so it was left untouched. Ask again to work from the current version.",
+        "delete_google_calendar_event"
+      );
+    }
+
+    const res = await g.deleteEvent({
+      calendarId: resolved.calendarId,
+      eventId: resolved.eventId,
+      etag: current.etag,
+    });
+    if (!res.ok) {
+      const code = res.code === "conflict" ? CONFLICT : res.code === "not_found" ? TARGET_MISSING : res.code || "provider_error";
+      return failure(code, res.detail || "Google didn't accept that deletion.", "delete_google_calendar_event");
+    }
+
+    g.invalidate?.();
+    return success("delete_google_calendar_event", {
+      target: { kind: "google event", id: resolved.eventId, title: current.title, date: current.date },
+      applied: "deleted",
+    });
+  },
+};
+
 /* ============================================================
    PROTECTED EXECUTION (Stage 6)
 
@@ -818,9 +1205,21 @@ export const TARGET_MISSING = "target_missing";
  * Executes an approved protected action. Only the approval manager
  * should call this, and it revalidates regardless of who does.
  */
-export function executeProtectedAction(actionName, params, runtime, expectedFingerprint) {
-  const spec = PROTECTED_TARGETS[actionName];
+export async function executeProtectedAction(actionName, params, runtime, expectedFingerprint, resolved) {
   const def = REGISTRY.get(actionName);
+
+  // A protected action whose record lives in Google rather than in
+  // flightplan_data. Same contract, same guarantees, different storage:
+  // the revalidation is a live read from the provider instead of a look
+  // at the local blob.
+  if (REMOTE_PROTECTED[actionName]) {
+    if (!def || AUTO_EXECUTE.has(def.permission)) {
+      return failure("unknown_action", "Not a protected action.", actionName);
+    }
+    return REMOTE_PROTECTED[actionName](params, runtime, expectedFingerprint, resolved);
+  }
+
+  const spec = PROTECTED_TARGETS[actionName];
   if (!spec || !def || AUTO_EXECUTE.has(def.permission)) {
     return failure("unknown_action", "Not a protected action.", actionName);
   }
@@ -954,7 +1353,7 @@ export function createActionHistory(max = MAX_HISTORY) {
    EXECUTE
    The single entry point. `rawIntent` is untrusted model output.
    ============================================================ */
-export function executeCirrusAction(rawIntent, runtime = {}) {
+export async function executeCirrusAction(rawIntent, runtime = {}) {
   const history = runtime.history;
   const finish = (result, permission) => {
     if (history && typeof history.record === "function") {
@@ -1002,7 +1401,7 @@ export function executeCirrusAction(rawIntent, runtime = {}) {
   const permission = def.permission;
 
   if (!AUTO_EXECUTE.has(permission)) {
-    const proposal = def.proposal ? def.proposal(params, runtime) : { params };
+    const proposal = def.proposal ? await def.proposal(params, runtime) : { params };
     if (proposal && proposal.error) {
       return finish(failure("not_found", proposal.error, name), permission);
     }
@@ -1017,9 +1416,11 @@ export function executeCirrusAction(rawIntent, runtime = {}) {
     );
   }
 
-  /* 6. execute — a real function from the registry entry */
+  /* 6. execute — a real function from the registry entry.
+        Handlers may be async (a Google Calendar write is a network
+        round trip); awaiting here keeps one path for both kinds. */
   try {
-    const result = def.handler(params, runtime);
+    const result = await def.handler(params, runtime);
     return finish(
       attemptedOverride.length ? { ...result, ignoredModelFields: attemptedOverride } : result,
       permission

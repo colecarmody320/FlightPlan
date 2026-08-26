@@ -1,15 +1,25 @@
-import React, { useCallback, useRef, useState, useEffect } from "react";
+import React, { useCallback, useMemo, useRef, useState, useEffect } from "react";
 import { CIRRUS_MODES, WAVEFORM_STATES } from "./cirrusShared.js";
 import { useCirrusConversation } from "./cirrusConversation.js";
 import {
   createApprovalManager,
   describeProposal,
   classifyUtterance,
+  verifyClaim,
   ROUTES,
 } from "./cirrusApproval.js";
-import { createActionHistory } from "./cirrusActions.js";
+import { createActionHistory, listActions } from "./cirrusActions.js";
+import { buildCirrusContext } from "./cirrusContext.js";
+import {
+  googleGetEvent,
+  googleCreateEvent,
+  googleUpdateEvent,
+  googleDeleteEvent,
+  invalidateGoogleCalendar,
+  localTimeZone,
+} from "./googleCalendar.js";
 import { useVoiceInput, SPEECH_STATES } from "./cirrusSpeech.js";
-import { useCirrusVoice } from "./cirrusVoice.js";
+import { useCirrusVoice, diagnoseVoice } from "./cirrusVoice.js";
 
 /* ============================================================
    CIRRUS — personal assistant layer
@@ -159,6 +169,28 @@ export function ApprovalCard({ pending, data, onApprove, onCancel }) {
   );
 }
 
+/* Voice failures that happen entirely in the browser. The Edge
+   Function has nothing to add about these, so no diagnostic control is
+   offered for them. */
+const CLIENT_SIDE_TTS_CODES = new Set(["playback_blocked", "disabled", "superseded", "empty_audio"]);
+
+/* What Cirrus says after an action actually ran. Built from the
+   registry's own result rather than from anything the model claimed, so
+   it can only ever report what really happened. */
+function describeOutcome(outcome) {
+  const r = outcome?.result || {};
+  switch (outcome?.action) {
+    case "create_google_calendar_event":
+      return `Added "${r.title}" on ${r.date}${r.when && r.when !== "—" ? `, ${r.when}` : ""}.`;
+    case "update_google_calendar_event":
+      return `Updated "${r.target?.title || "that event"}"${r.target?.when && r.target.when !== "—" ? ` — now ${r.target.when}` : ""}.`;
+    case "delete_google_calendar_event":
+      return `Removed "${r.target?.title || "that event"}" from your calendar.`;
+    default:
+      return `Done${r.applied ? ` — ${r.applied}` : ""}.`;
+  }
+}
+
 const formatValue = (v) =>
   v === null || v === undefined || v === ""
     ? "—"
@@ -170,12 +202,31 @@ const formatValue = (v) =>
     ? `${String(v).slice(0, 60)}…`
     : String(v);
 
-export function CirrusDock({ data, update, open, setOpen, page, selectedObject, helpers }) {
+export function CirrusDock({ data, update, open, setOpen, page, selectedObject, helpers, google }) {
   const mode = data?.cirrus?.mode || CIRRUS_MODES.OFF;
   const [collapsed, setCollapsed] = useState(false);
   const [draft, setDraft] = useState("");
   const panelRef = useRef(null);
-  const conversation = useCirrusConversation({ mode, page, selectedObject });
+  /* Built fresh for each turn from current data, so Cirrus answers from
+     what the user actually has rather than asking them to restate it —
+     and so an event can be identified by description. Read-only: the
+     context builders never touch `update`. */
+  const getRequestExtras = useCallback(
+    (request) => {
+      const built = buildCirrusContext({
+        data,
+        helpers,
+        request,
+        page,
+        selectedObject,
+        externalEvents: google?.events || [],
+      });
+      return { appContext: built?.context || null, actions: listActions() };
+    },
+    [data, helpers, page, selectedObject, google?.events]
+  );
+
+  const conversation = useCirrusConversation({ mode, page, selectedObject, getRequestExtras });
 
   /* ---------- approval gate (Stage 6) ----------
      Session-local and in memory. A reload drops any pending change,
@@ -196,44 +247,93 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
      modules at construction, so in OFF and QUIET the microphone cannot
      be opened and no ElevenLabs request can be made — not merely
      hidden in the UI. */
-  const voiceAllowed = mode === CIRRUS_MODES.COMPANION;
+  /* Voice is live only while Companion is selected AND the panel is
+     open. The dock's toggle button stays mounted when the panel is
+     closed, so without the `open` term a session started here would
+     keep the microphone after the panel was dismissed — which is
+     exactly what it did. */
+  const voiceAllowed = mode === CIRRUS_MODES.COMPANION && open;
   // Set by the first deliberate mic tap. Until then Cirrus stays silent
   // even in Companion, so typing never unexpectedly starts talking.
   const [voiceSession, setVoiceSession] = useState(false);
   const [micNote, setMicNote] = useState(null);
+  const [voiceReport, setVoiceReport] = useState(null);
 
   const tts = useCirrusVoice({ enabled: voiceAllowed });
   const ttsRef = useRef(tts);
   ttsRef.current = tts;
+  // Assigned further down, once useVoiceInput has run. Held in a ref so
+  // setMode and the close/unmount paths can release synchronously.
+  const micRef = useRef(null);
 
   useEffect(() => {
     if (!voiceAllowed) {
       setVoiceSession(false);
       setMicNote(null);
+      micRef.current?.release();
+      ttsRef.current?.stop();
     }
   }, [voiceAllowed]);
 
+  // Unmounting the dock entirely — signing out, or the app tearing
+  // down — releases capture and stops playback too.
+  useEffect(
+    () => () => {
+      micRef.current?.release();
+      ttsRef.current?.stop();
+    },
+    []
+  );
+
+  /* The Google Calendar client an action runs against.
+
+     Injected rather than imported by the action registry, the same way
+     app helpers are, so the registry stays free of network code and the
+     tests can drive a fake provider. The events list is whatever the
+     calendar is currently showing, which is what makes "my study
+     session tomorrow" resolvable to a real event id. */
+  const googleRuntime = useMemo(
+    () => ({
+      connected: Boolean(google?.connected),
+      events: google?.events || [],
+      calendars: google?.calendars || [],
+      selected: google?.selected || [],
+      timeZone: localTimeZone(),
+      getEvent: googleGetEvent,
+      createEvent: googleCreateEvent,
+      updateEvent: googleUpdateEvent,
+      deleteEvent: googleDeleteEvent,
+      // Pulls the change into the Calendar tab and Home's week strip at
+      // once, instead of leaving them stale until the next poll.
+      invalidate: invalidateGoogleCalendar,
+    }),
+    [google?.connected, google?.events, google?.calendars, google?.selected]
+  );
+
   // `data` and `update` change identity on every save, so the runtime is
   // read fresh at call time rather than captured when a proposal is made.
-  const runtimeRef = useRef({ data, update, helpers });
-  runtimeRef.current = { data, update, helpers };
+  const runtimeRef = useRef({ data, update, helpers, google: googleRuntime });
+  runtimeRef.current = { data, update, helpers, google: googleRuntime };
 
   const syncPending = useCallback(() => {
     setPending(approvalRef.current.getPending());
   }, []);
 
-  // The one door a structured action may enter by. Stage 5 built the
-  // registry and this stage built the gate in front of it, but the
-  // deployed cirrus-chat contract is still `{ reply: string }` — the
-  // backend has no action channel yet, so nothing calls this today.
-  // When that channel lands, this is the only line that needs to run,
-  // and every protected action arrives already gated.
-  const proposeAction = useCallback((intent) => {
-    const result = approvalRef.current.propose(intent, runtimeRef.current);
-    syncPending();
-    return result;
-  }, [syncPending]);
-  void proposeAction;
+  /* The one door a structured action may enter by.
+
+     Everything Cirrus proposes arrives here, and the approval manager
+     decides what happens: a read or a create runs, and an edit or a
+     delete becomes a pending transaction the user has to approve. The
+     model's own opinion about permission is discarded before this
+     point and is not consulted after it. */
+  const proposeAction = useCallback(
+    async (intent) => {
+      const result = await approvalRef.current.propose(intent, runtimeRef.current);
+      syncPending();
+      return result;
+    },
+    [syncPending]
+  );
 
   // Ticks the countdown and retires the transaction the moment the
   // window closes, so the card can never invite an approval that would
@@ -258,13 +358,16 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
   const say = useCallback((text) => sayRef.current(text), []);
 
   const resolveApproval = useCallback(
-    (input) => {
-      const result = approvalRef.current.resolve(input, runtimeRef.current);
+    async (input) => {
+      const result = await approvalRef.current.resolve(input, runtimeRef.current);
       syncPending();
       if (result.status === "ambiguous") return result; // caller decides what to say
       const said =
         result.status === "success"
-          ? `Done — ${result.result?.applied || "applied"}.`
+          ? // Same description an auto-executed action gets, so an
+            // approved change is reported as specifically as an
+            // immediate one — and always from the registry's result.
+            describeOutcome(result)
           : result.status === "rejected"
           ? "Left unchanged."
           : result.status === "no_pending_action"
@@ -289,8 +392,22 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
     return () => document.removeEventListener("keydown", onKey);
   }, [open, setOpen]);
 
-  const setMode = (m) =>
+  const setMode = (m) => {
+    /* Release before the state change, not as a consequence of it.
+       Waiting for `enabled` to flip through a render leaves the
+       microphone open across that gap, and OFF and QUIET must never
+       have it open for any interval at all. */
+    if (m !== CIRRUS_MODES.COMPANION) {
+      micRef.current?.release();
+      ttsRef.current?.stop();
+      // A voice error is noise once voice is deliberately off; Quiet
+      // should not carry a complaint about a subsystem it never uses.
+      ttsRef.current?.clearError?.();
+      setVoiceReport(null);
+      setVoiceSession(false);
+    }
     update((d) => ({ ...d, cirrus: { ...(d.cirrus || blankCirrus()), mode: m } }));
+  };
 
   /* ============================================================
      THE SUBMIT PATH
@@ -352,8 +469,40 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
         // failable step that cannot delay or discard the text.
         ttsRef.current.speak(result.reply);
       }
+
+      if (!result?.ok) return;
+
+      /* If Cirrus proposed something, run it through the gate. The
+         reply text is already on screen and stays there whatever
+         happens next — a rejected or impossible action changes what
+         Cirrus says afterwards, never what it already said. */
+      let outcome = null;
+      if (result.action) {
+        outcome = await proposeAction(result.action);
+        if (outcome.status === "success") {
+          say(describeOutcome(outcome));
+        } else if (outcome.status === "error" || outcome.status === "unsupported") {
+          // Includes "which one did you mean?" — Cirrus asks rather
+          // than picking, and nothing has been changed.
+          say(outcome.message || "I couldn't do that.");
+        } else if (outcome.status === "pending_exists") {
+          say(outcome.message);
+        }
+        // approval_required needs no line here: the card says it.
+      }
+
+      /* Last line of defence. If the reply claimed a change but no
+         action ran, contradict it. Only this code knows what really
+         happened, so only this code can be trusted to say so. */
+      const correction = verifyClaim({
+        reply: result.reply,
+        action: result.action,
+        executed: outcome,
+        actionChannel: result.actionChannel,
+      });
+      if (correction) say(correction);
     },
-    [conversation, say, resolveApproval, voiceAllowed, voiceSession]
+    [conversation, say, resolveApproval, proposeAction, voiceAllowed, voiceSession]
   );
 
   const sendDraft = (e) => {
@@ -376,6 +525,7 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
   );
 
   const mic = useVoiceInput({ enabled: voiceAllowed, onTranscript: handleTranscript });
+  micRef.current = mic;
 
   /* One control, two jobs: stop if listening, otherwise start.
      `unlock()` runs synchronously inside the tap because iOS grants
@@ -558,7 +708,38 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
                     {tts.error && (
                       <div className="cirrus-error" role="status">
                         <p className="cirrus-error-msg">{tts.error.message}</p>
+                        {/* The actual cause, shown inline because there
+                            is no console to open on a tablet. */}
+                        {tts.error.detail && (
+                          <p className="cirrus-error-detail">
+                            {tts.error.code}: {tts.error.detail}
+                          </p>
+                        )}
                         <p className="cirrus-error-detail">The reply above is unaffected.</p>
+                        {/* Offered only for failures the server can
+                            explain. A blocked autoplay or a superseded
+                            turn is a browser-side fact we already know,
+                            and asking the function about it would tell
+                            the user nothing. */}
+                        {!CLIENT_SIDE_TTS_CODES.has(tts.error.code) && (
+                        <button
+                          type="button"
+                          className="cirrus-chip live"
+                          onClick={async () => {
+                            setVoiceReport("Checking…");
+                            const r = await diagnoseVoice();
+                            setVoiceReport(
+                              r.ok
+                                ? r.report?.problem ||
+                                  `Configuration looks correct. Models available: ${(r.report?.availableTextToSpeechModels || []).join(", ") || "none reported"}.`
+                                : `${r.code}: ${r.detail || "no detail"}`
+                            );
+                          }}
+                        >
+                          Why?
+                        </button>
+                        )}
+                        {voiceReport && <p className="cirrus-error-detail">{voiceReport}</p>}
                       </div>
                     )}
 

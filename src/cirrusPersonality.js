@@ -77,6 +77,80 @@ the data doesn't support a confident answer.
 `.trim(),
 };
 
+
+/* ============================================================
+   ACTION PROTOCOL
+
+   How Cirrus asks FlightPlan to do something. The model does not act;
+   it proposes, in a form FlightPlan validates against its own registry
+   before anything happens. Permission is decided by that registry, so
+   nothing the model writes here can raise its own privileges — a
+   delete stays a delete however confidently it is phrased.
+
+   Read-only and creating actions run straight away. Changing or
+   removing anything raises an approval card the user must press. That
+   is why the wording rules below matter: claiming a change has already
+   happened, when it is actually sitting unapproved, is the one thing
+   that would make this system feel untrustworthy.
+   ============================================================ */
+export const CIRRUS_ACTION_PROTOCOL = `
+ACTIONS
+
+You can ask FlightPlan to do things by ending your reply with one
+action block, exactly like this and nothing else after it:
+
+\u0060\u0060\u0060cirrus-action
+{"action": "<name>", "parameters": { ... }}
+\u0060\u0060\u0060
+
+Rules:
+
+- At most one action block per reply. No block at all if the user is
+  only asking a question.
+- Use only an action listed under AVAILABLE ACTIONS. Never invent one.
+- Put only the parameters that action lists. Do not add fields about
+  permission, approval, confirmation or urgency; they are ignored.
+- Write the reply text as though the action has been REQUESTED, not
+  completed. Say "I'll add that" or "That would move it to 2pm" — never
+  "I've added it" or "Done". FlightPlan decides what actually happens
+  and tells the user the outcome.
+- For anything that changes or removes a record, the user will see an
+  approval card. Describe what you are proposing in one short sentence
+  and stop. Do not ask them to type yes; the card is there.
+- If you are missing something you need, ask for it instead of sending
+  an action with a guess in it.
+
+DATES AND TIMES
+
+- Give a date as YYYY-MM-DD, or the single word today or tomorrow.
+  Never write a date any other way, and never compute one yourself from
+  a day name or a phrase like "next week" — ask instead.
+- Give times as 24-hour HH:MM in the user's local time.
+- Never convert between timezones, and never add a UTC offset.
+  FlightPlan attaches the timezone.
+
+IDENTIFYING AN EXISTING EVENT
+
+- Never invent an event id. To point at an existing calendar event,
+  pass \u0060query\u0060 with words from its title and \u0060date\u0060 with the day.
+- If more than one event could match, FlightPlan will tell you and you
+  should ask the user which one they mean.
+`.trim();
+
+/** Renders the registry's own list, so the prompt can never drift out
+    of step with what FlightPlan will actually accept. */
+export function formatActionCatalogue(actions) {
+  if (!Array.isArray(actions) || !actions.length) return "";
+  const lines = actions.map((a) => {
+    const params = Array.isArray(a.parameters) && a.parameters.length
+      ? a.parameters.map((p) => (p.required ? `${p.name}*` : p.name)).join(", ")
+      : "none";
+    const gate = a.permission === "read" || a.permission === "create" ? "runs immediately" : "needs approval";
+    return `- ${a.action} (${gate}): ${a.description} [${params}]`;
+  });
+  return `AVAILABLE ACTIONS\n(* = required)\n${lines.join("\n")}`;
+}
+
 function describeSelection(sel) {
   if (!sel) return null;
   if (typeof sel === "string") return sel;
@@ -113,12 +187,19 @@ export function buildCirrusSystemPrompt({
   operatingMode = "quiet",
   taskMode = CIRRUS_TASK_MODES.NORMAL,
   context = {},
+  actions = null,
+  appContext = null,
 } = {}) {
   const parts = [
     CIRRUS_BASE_PERSONALITY,
     CIRRUS_OPERATING_MODE_INSTRUCTIONS[operatingMode] || "",
     CIRRUS_TASK_MODE_INSTRUCTIONS[taskMode] || CIRRUS_TASK_MODE_INSTRUCTIONS[CIRRUS_TASK_MODES.NORMAL],
     formatContext(context),
+    // Read-only facts about the user's FlightPlan, so Cirrus answers
+    // from their actual data instead of asking for it back.
+    appContext ? `FLIGHTPLAN DATA\n${JSON.stringify(appContext)}` : "",
+    actions ? CIRRUS_ACTION_PROTOCOL : "",
+    actions ? formatActionCatalogue(actions) : "",
   ].filter(Boolean);
 
   return parts.join("\n\n");
