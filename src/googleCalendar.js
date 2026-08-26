@@ -25,6 +25,8 @@ const MESSAGES = {
   server_misconfigured: "Google Calendar isn't configured on the server.",
   bad_request: "That request couldn't be sent.",
   network_error: "Couldn't reach Google Calendar.",
+  not_found: "That event no longer exists in Google Calendar.",
+  conflict: "That event changed in Google, so it was left untouched.",
 };
 const friendly = (code) => MESSAGES[code] || "Something went wrong.";
 
@@ -74,6 +76,59 @@ export const googleEvents = (from, to) =>
     // calendar renders in the user's actual local time.
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
   });
+
+/* ============================================================
+   WRITE CLIENT
+
+   The mutating half of the integration. It is deliberately thin: every
+   one of these takes already-validated primitives and forwards them to
+   the Edge Function, which holds the tokens and does the talking. No
+   Google endpoint, token, or client secret exists on this side, and
+   nothing here writes to flightplan_data — a Google event lives in
+   Google, and FlightPlan only ever re-reads it.
+
+   `etag` is the concurrency token. Pass the one seen when the change
+   was proposed and a stale write is refused rather than applied.
+   ============================================================ */
+export const googleGetEvent = ({ calendarId, eventId }) =>
+  callFn("event_get", { calendarId, eventId });
+
+export const googleCreateEvent = (payload) => callFn("event_create", payload);
+
+export const googleUpdateEvent = ({ calendarId, eventId, etag, changes, timeZone }) =>
+  callFn("event_update", { calendarId, eventId, etag, changes, timeZone });
+
+export const googleDeleteEvent = ({ calendarId, eventId, etag }) =>
+  callFn("event_delete", { calendarId, eventId, etag });
+
+/** The zone Google should resolve wall-clock times in. Read from the
+    device, never computed and never supplied by the model. */
+export const localTimeZone = () => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+};
+
+/* ---------- refresh bus ----------
+   CalendarTab and ThisWeekPanel each hold their own instance of the
+   hook, so a mutation made from Cirrus has to reach both. This is a
+   one-line pub/sub rather than a shared store: it changes nothing about
+   how the calendar is structured, and it means a successful write shows
+   up immediately instead of waiting out the 15-minute freshness
+   window. */
+const refreshListeners = new Set();
+
+export function invalidateGoogleCalendar() {
+  for (const fn of refreshListeners) {
+    try {
+      fn();
+    } catch {
+      /* one stale listener must not stop the others */
+    }
+  }
+}
 
 /** Begins OAuth by navigating to Google's consent screen. */
 export async function googleConnect() {
@@ -204,6 +259,18 @@ export function useGoogleCalendar({ user, from, to } = {}) {
   useEffect(() => {
     fetchEvents(false);
   }, [fetchEvents]);
+
+  // An immediate, un-gated refresh after any successful mutation, from
+  // this instance of the hook or any other.
+  useEffect(() => {
+    if (!user || !status.connected) return;
+    const onInvalidate = () => {
+      lastFetch.current = 0; // bypass the freshness window deliberately
+      fetchEvents(true);
+    };
+    refreshListeners.add(onInvalidate);
+    return () => refreshListeners.delete(onInvalidate);
+  }, [user, status.connected, fetchEvents]);
 
   // Periodic refresh and return-from-background, both freshness-gated.
   useEffect(() => {

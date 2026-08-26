@@ -12,6 +12,7 @@ import {
 } from "./aviation.jsx";
 import { CIRRUS_CSS, migrateCirrus, CirrusDock, CirrusHomeStrip } from "./cirrus.jsx";
 import { CalendarTab, ThisWeekPanel, CALENDAR_CSS } from "./calendarUI.jsx";
+import { useGoogleCalendar } from "./googleCalendar.js";
 const ALLOWED_EMAIL = "nicholasmcarmody@gmail.com";
 
 /* ============================================================
@@ -1126,6 +1127,21 @@ export default function CollegeHub() {
   const cabin = useCabin();
   const visited = useRef(new Set());
 
+  /* The window of Google events Cirrus can reason about and act on. It
+     reaches further ahead than the calendar's own week view so that
+     "move my checkride" resolves without the user first navigating
+     there. Read-only from App's point of view; the Calendar tab and
+     the week strip keep their own instances, and all of them refresh
+     together after a successful change. */
+  const cirrusCalendar = useGoogleCalendar({
+    // Off means off: with Cirrus disabled this window is never fetched.
+    // The Calendar tab keeps its own instance, so turning Cirrus off
+    // costs the calendar nothing.
+    user: (data?.cirrus?.mode || "off") === "off" ? null : user,
+    from: todayISO(),
+    to: addDays(todayISO(), 21),
+  });
+
   // Cmd+J / Ctrl+J toggles the Cirrus panel from anywhere in the app,
   // except while the user is typing.
   useEffect(() => {
@@ -1371,6 +1387,7 @@ export default function CollegeHub() {
           data={data}
           update={update}
           helpers={CIRRUS_HELP}
+          google={cirrusCalendar}
           open={cirrusOpen}
           setOpen={setCirrusOpen}
           page={tab}

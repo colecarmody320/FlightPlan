@@ -61,7 +61,7 @@ function blankConversation({ mode, page } = {}) {
  * the app's current tab, the current selection) and this hook keeps
  * them in sync without resetting the conversation itself.
  */
-export function useCirrusConversation({ mode, page, selectedObject } = {}) {
+export function useCirrusConversation({ mode, page, selectedObject, getRequestExtras } = {}) {
   const [state, setState] = useState(() => blankConversation({ mode, page }));
 
   // Mirrors state so send() can read the current transcript/context
@@ -70,6 +70,12 @@ export function useCirrusConversation({ mode, page, selectedObject } = {}) {
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
+
+  // Supplies the read-only app context and action catalogue at send
+  // time. Held in a ref so `send` does not have to be rebuilt whenever
+  // the user's data changes.
+  const extrasRef = useRef(getRequestExtras);
+  extrasRef.current = getRequestExtras;
 
   useEffect(() => {
     setState((s) => (s.mode === mode ? s : { ...s, mode }));
@@ -148,6 +154,15 @@ export function useCirrusConversation({ mode, page, selectedObject } = {}) {
         voiceState: WAVEFORM_STATES.THINKING,
       }));
 
+      let extras = {};
+      try {
+        extras = extrasRef.current ? extrasRef.current(trimmed) || {} : {};
+      } catch {
+        // Context is an enhancement. If building it fails, Cirrus still
+        // answers — just without the extra facts.
+        extras = {};
+      }
+
       const result = await sendCirrusMessage({
         message: trimmed,
         history,
@@ -156,6 +171,8 @@ export function useCirrusConversation({ mode, page, selectedObject } = {}) {
         selectedObject: snapshot.selectedObject,
         activeTopic: snapshot.activeTopic,
         taskMode: snapshot.taskMode,
+        appContext: extras.appContext || null,
+        actions: extras.actions || null,
       });
 
       if (result.ok) {
@@ -169,7 +186,7 @@ export function useCirrusConversation({ mode, page, selectedObject } = {}) {
         // Returned so a caller can speak the reply. The transcript is
         // already updated either way — nothing downstream can delay or
         // suppress the text by acting on this.
-        return { ok: true, reply: result.reply };
+        return { ok: true, reply: result.reply, action: result.action || null };
       }
 
       // A failure leaves the transcript and every byte of application

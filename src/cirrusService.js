@@ -119,6 +119,11 @@ export async function sendCirrusMessage({
   selectedObject,
   activeTopic,
   taskMode = CIRRUS_TASK_MODES.NORMAL,
+  // Read-only facts about the user's FlightPlan and the list of things
+  // Cirrus is allowed to propose. Both are supplied by the caller so
+  // this module stays the single network boundary and nothing else.
+  appContext = null,
+  actions = null,
 } = {}) {
   // OFF means zero requests. Guarded here as well as in the UI so no
   // future call site can reach the network while Cirrus is off.
@@ -139,6 +144,8 @@ export async function sendCirrusMessage({
     operatingMode: mode,
     taskMode,
     context: { page, selectedObject, activeTopic },
+    appContext: capContext(appContext),
+    actions,
   });
 
   const body = {
@@ -182,10 +189,50 @@ export async function sendCirrusMessage({
     return fail(CIRRUS_ERRORS.MALFORMED_PROVIDER_RESPONSE);
   }
 
+  // A proposed action, if Cirrus made one. Deliberately passed through
+  // unvalidated: the action registry is the only thing entitled to
+  // decide whether it is real, well-formed, or permitted.
+  const raw = result.data?.action;
+  const action =
+    raw && typeof raw === "object" && typeof raw.action === "string"
+      ? { action: raw.action, parameters: raw.parameters && typeof raw.parameters === "object" ? raw.parameters : {} }
+      : null;
+
   return {
     ok: true,
     reply,
+    action,
     model: result.data?.model,
     truncated: Boolean(result.data?.truncated),
   };
+}
+
+/* The Edge Function caps the system prompt, and a full week of calendar
+   plus every other domain can get large. Trim the least useful part —
+   depth — rather than letting the whole request be rejected. */
+const MAX_CONTEXT_CHARS = 12000;
+
+function capContext(appContext) {
+  if (!appContext || typeof appContext !== "object") return null;
+  let json = "";
+  try {
+    json = JSON.stringify(appContext);
+  } catch {
+    return null;
+  }
+  if (json.length <= MAX_CONTEXT_CHARS) return appContext;
+
+  // Drop whole domains, largest first, so what survives stays valid
+  // rather than becoming a truncated fragment.
+  const entries = Object.entries(appContext)
+    .map(([k, v]) => [k, v, JSON.stringify(v)?.length || 0])
+    .sort((a, b) => b[2] - a[2]);
+  const kept = {};
+  let used = 0;
+  for (const [k, v, size] of [...entries].reverse()) {
+    if (used + size > MAX_CONTEXT_CHARS) continue;
+    kept[k] = v;
+    used += size;
+  }
+  return Object.keys(kept).length ? kept : null;
 }

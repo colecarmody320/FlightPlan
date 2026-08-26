@@ -15,6 +15,20 @@
      POST ?action=select      -> { selected: [...] }        body: { calendarIds }
      POST ?action=events      -> { events: [...] }          body: { from, to, timeZone }
      POST ?action=disconnect  -> { connected: false }
+     POST ?action=event_get    -> { event }   body: { calendarId, eventId }
+     POST ?action=event_create -> { event }   body: { calendarId, title, date, start, end, allDay, timeZone, description, location }
+     POST ?action=event_update -> { event }   body: { calendarId, eventId, etag?, changes:{...}, timeZone }
+     POST ?action=event_delete -> { deleted } body: { calendarId, eventId, etag? }
+
+   The three mutating routes exist so Cirrus can act on the calendar
+   without the browser — or the model — ever touching Google. The model
+   proposes a structured intent; FlightPlan validates it, and only this
+   function, holding the tokens, talks to the Calendar API.
+
+   Concurrency: every mutation is conditional. The caller passes the
+   etag it last saw, which becomes an If-Match header, and this function
+   additionally re-reads the event and compares it before writing. A
+   mismatch is reported as a conflict and nothing is changed.
 
    TOKENS NEVER LEAVE THE SERVER. They are written to
    public.user_integrations, which has RLS on and zero policies, so the
@@ -246,6 +260,119 @@ function normalize(ev: any, calId: string, calName: string) {
     allDay: false,
   });
   return out;
+}
+
+
+/* ============================================================
+   EVENT MUTATION HELPERS
+
+   Google's own representation is built here, from validated primitives,
+   never from free-form model text. The caller supplies a local date and
+   wall-clock time plus an IANA zone; Google resolves that to an
+   instant. No offset arithmetic happens anywhere in FlightPlan or in
+   the model — which is exactly why none of it can be invented.
+   ============================================================ */
+const CAL_API = "https://www.googleapis.com/calendar/v3/calendars";
+const MAX_TITLE = 300;
+const MAX_TEXT = 2000;
+
+const isDate = (v: unknown) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
+const isTime = (v: unknown) => typeof v === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(v);
+const isZone = (v: unknown) => typeof v === "string" && /^[A-Za-z]+\/[A-Za-z0-9_+\-\/]+$|^UTC$/.test(v);
+const clean = (v: unknown, max: number) =>
+  typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null;
+
+const eventUrl = (calId: string, eventId?: string) =>
+  `${CAL_API}/${encodeURIComponent(calId)}/events${eventId ? `/${encodeURIComponent(eventId)}` : ""}`;
+
+/** Builds the start/end pair Google expects for a timed or all-day event. */
+function buildTimes(
+  body: { date?: unknown; start?: unknown; end?: unknown; allDay?: unknown; endDate?: unknown },
+  timeZone: string,
+): { start: any; end: any } | { error: string } {
+  const date = body.date;
+  if (!isDate(date)) return { error: "`date` must be YYYY-MM-DD." };
+
+  if (body.allDay === true) {
+    // Google's all-day end date is exclusive.
+    const endDate = isDate(body.endDate) ? (body.endDate as string) : null;
+    const [y, m, d] = (date as string).split("-").map(Number);
+    const nextDay = new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
+    return { start: { date }, end: { date: endDate || nextDay } };
+  }
+
+  if (!isTime(body.start)) return { error: "`start` must be HH:MM." };
+  if (!isTime(body.end)) return { error: "`end` must be HH:MM." };
+  if ((body.end as string) <= (body.start as string)) {
+    return { error: "`end` must be later than `start`." };
+  }
+  return {
+    start: { dateTime: `${date}T${body.start}:00`, timeZone },
+    end: { dateTime: `${date}T${body.end}:00`, timeZone },
+  };
+}
+
+/** Surfaces Google's own explanation so a rejection is diagnosable. */
+async function googleDetail(res: Response): Promise<string> {
+  try {
+    const body = await res.json();
+    return body?.error?.message || `HTTP ${res.status}`;
+  } catch {
+    return `HTTP ${res.status}`;
+  }
+}
+
+/** A compact, token-free summary of an event for conflict previews. */
+function summarize(ev: any) {
+  return {
+    eventId: ev.id,
+    etag: ev.etag ?? null,
+    title: ev.summary || "(no title)",
+    allDay: Boolean(ev.start?.date),
+    date: ev.start?.date || String(ev.start?.dateTime || "").slice(0, 10) || null,
+    start: ev.start?.dateTime ? String(ev.start.dateTime).slice(11, 16) : null,
+    end: ev.end?.dateTime ? String(ev.end.dateTime).slice(11, 16) : null,
+    location: ev.location || null,
+    status: ev.status || null,
+    htmlLink: ev.htmlLink || null,
+  };
+}
+
+/** The fields a change to which makes the event materially different. */
+const materially = (ev: any) =>
+  JSON.stringify([
+    ev.summary || "",
+    ev.start?.date || ev.start?.dateTime || "",
+    ev.end?.date || ev.end?.dateTime || "",
+    ev.location || "",
+    ev.status || "",
+  ]);
+
+/**
+ * Confirms the caller may write, and that the connection actually
+ * carries the events scope. A read-only grant must fail loudly rather
+ * than producing a confusing 403 from Google.
+ */
+async function writableToken(
+  db: any,
+  userId: string,
+): Promise<{ token: string } | { error: string; message: string }> {
+  const { data: row } = await db
+    .from("user_integrations")
+    .select("scope")
+    .eq("user_id", userId)
+    .eq("provider", PROVIDER)
+    .maybeSingle();
+  const scope: string = row?.scope || "";
+  if (scope && !scope.includes("auth/calendar.events") && !scope.includes("auth/calendar ")) {
+    return {
+      error: "reauth_required",
+      message: "Reconnect Google Calendar to allow changes — the current connection is read-only.",
+    };
+  }
+  const tok = await accessTokenFor(userId);
+  if ("error" in tok) return { error: tok.error, message: "Reconnect Google Calendar." };
+  return tok;
 }
 
 /* ---------- handler ---------- */
@@ -485,6 +612,194 @@ Deno.serve(async (req: Request) => {
 
     log("events_ok", { calendars: calendars.length, events: events.length });
     return json({ events, calendars, fetchedAt: new Date().toISOString() }, 200, origin);
+  }
+
+
+  /* ---- event_get: read one event, for revalidation and previews ---- */
+  if (action === "event_get") {
+    let b: any = {};
+    try { b = await req.json(); } catch { return fail("bad_request", "Body must be JSON.", 400, origin); }
+    const calendarId = clean(b?.calendarId, 300);
+    const eventId = clean(b?.eventId, 300);
+    if (!calendarId || !eventId) return fail("bad_request", "`calendarId` and `eventId` are required.", 400, origin);
+
+    const tok = await accessTokenFor(userId);
+    if ("error" in tok) return fail(tok.error, "Reconnect Google Calendar.", 400, origin);
+
+    const r = await timedFetch(eventUrl(calendarId, eventId), {
+      headers: { Authorization: `Bearer ${tok.token}` },
+    });
+    if (r.status === 404) return fail("not_found", "That event no longer exists.", 404, origin);
+    if (!r.ok) {
+      log("event_get_failed", { status: r.status });
+      return fail("provider_error", `Google returned ${r.status}: ${await googleDetail(r)}`, 502, origin);
+    }
+    const ev = await r.json();
+    if (ev.status === "cancelled") return fail("not_found", "That event has been cancelled.", 404, origin);
+    return json({ event: summarize(ev) }, 200, origin);
+  }
+
+  /* ---- event_create ---- */
+  if (action === "event_create") {
+    let b: any = {};
+    try { b = await req.json(); } catch { return fail("bad_request", "Body must be JSON.", 400, origin); }
+
+    const calendarId = clean(b?.calendarId, 300);
+    const title = clean(b?.title, MAX_TITLE);
+    const timeZone = isZone(b?.timeZone) ? String(b.timeZone) : "UTC";
+    if (!calendarId) return fail("bad_request", "`calendarId` is required.", 400, origin);
+    if (!title) return fail("bad_request", "`title` is required.", 400, origin);
+
+    const times = buildTimes(b, timeZone);
+    if ("error" in times) return fail("bad_request", times.error, 400, origin);
+
+    const tok = await writableToken(db, userId);
+    if ("error" in tok) return fail(tok.error, tok.message, 400, origin);
+
+    const payload: any = { summary: title, start: times.start, end: times.end };
+    const description = clean(b?.description, MAX_TEXT);
+    const location = clean(b?.location, MAX_TEXT);
+    if (description) payload.description = description;
+    if (location) payload.location = location;
+
+    const r = await timedFetch(eventUrl(calendarId), {
+      method: "POST",
+      headers: { Authorization: `Bearer ${tok.token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      log("event_create_failed", { status: r.status });
+      return fail("provider_error", `Google returned ${r.status}: ${await googleDetail(r)}`, 502, origin);
+    }
+    const ev = await r.json();
+    log("event_created", { calendarHash: calendarId.length, allDay: Boolean(b?.allDay) });
+    return json({ event: summarize(ev) }, 200, origin);
+  }
+
+  /* ---- event_update ----
+     Conditional twice over: an If-Match header so Google itself refuses
+     a stale write, and an explicit re-read and compare here so the
+     guarantee does not depend on the provider honouring it. */
+  if (action === "event_update") {
+    let b: any = {};
+    try { b = await req.json(); } catch { return fail("bad_request", "Body must be JSON.", 400, origin); }
+
+    const calendarId = clean(b?.calendarId, 300);
+    const eventId = clean(b?.eventId, 300);
+    const etag = clean(b?.etag, 200);
+    const timeZone = isZone(b?.timeZone) ? String(b.timeZone) : "UTC";
+    const changes = b?.changes && typeof b.changes === "object" ? b.changes : null;
+    if (!calendarId || !eventId) return fail("bad_request", "`calendarId` and `eventId` are required.", 400, origin);
+    if (!changes) return fail("bad_request", "`changes` is required.", 400, origin);
+
+    const tok = await writableToken(db, userId);
+    if ("error" in tok) return fail(tok.error, tok.message, 400, origin);
+
+    // 1. does it still exist, and is it still what the proposal saw?
+    const cur = await timedFetch(eventUrl(calendarId, eventId), {
+      headers: { Authorization: `Bearer ${tok.token}` },
+    });
+    if (cur.status === 404) return fail("not_found", "That event no longer exists.", 404, origin);
+    if (!cur.ok) return fail("provider_error", `Google returned ${cur.status}: ${await googleDetail(cur)}`, 502, origin);
+    const before = await cur.json();
+    if (before.status === "cancelled") return fail("not_found", "That event has been cancelled.", 404, origin);
+    if (etag && before.etag && before.etag !== etag) {
+      log("event_update_conflict", { reason: "etag" });
+      return fail("conflict", "That event changed in Google after the proposal was made, so it was left untouched.", 409, origin);
+    }
+
+    // 2. build the patch from validated primitives only
+    const payload: any = {};
+    const title = clean(changes.title, MAX_TITLE);
+    if (title) payload.summary = title;
+    if (changes.description !== undefined) payload.description = clean(changes.description, MAX_TEXT) || "";
+    if (changes.location !== undefined) payload.location = clean(changes.location, MAX_TEXT) || "";
+    if (changes.date !== undefined || changes.start !== undefined || changes.end !== undefined) {
+      const times = buildTimes(
+        {
+          date: changes.date ?? before.start?.date ?? String(before.start?.dateTime || "").slice(0, 10),
+          start: changes.start ?? (before.start?.dateTime ? String(before.start.dateTime).slice(11, 16) : undefined),
+          end: changes.end ?? (before.end?.dateTime ? String(before.end.dateTime).slice(11, 16) : undefined),
+          allDay: changes.allDay ?? Boolean(before.start?.date),
+          endDate: changes.endDate,
+        },
+        timeZone,
+      );
+      if ("error" in times) return fail("bad_request", times.error, 400, origin);
+      payload.start = times.start;
+      payload.end = times.end;
+    }
+    if (!Object.keys(payload).length) return fail("bad_request", "No changes were specified.", 400, origin);
+
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${tok.token}`,
+      "Content-Type": "application/json",
+    };
+    if (before.etag) headers["If-Match"] = before.etag;
+
+    const r = await timedFetch(eventUrl(calendarId, eventId), {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify(payload),
+    });
+    if (r.status === 412) {
+      log("event_update_conflict", { reason: "if_match" });
+      return fail("conflict", "That event changed as the update was applied, so it was left untouched.", 409, origin);
+    }
+    if (r.status === 404) return fail("not_found", "That event no longer exists.", 404, origin);
+    if (!r.ok) {
+      log("event_update_failed", { status: r.status });
+      return fail("provider_error", `Google returned ${r.status}: ${await googleDetail(r)}`, 502, origin);
+    }
+    const ev = await r.json();
+    log("event_updated", { fields: Object.keys(payload).length });
+    return json({ event: summarize(ev), before: summarize(before) }, 200, origin);
+  }
+
+  /* ---- event_delete ---- */
+  if (action === "event_delete") {
+    let b: any = {};
+    try { b = await req.json(); } catch { return fail("bad_request", "Body must be JSON.", 400, origin); }
+
+    const calendarId = clean(b?.calendarId, 300);
+    const eventId = clean(b?.eventId, 300);
+    const etag = clean(b?.etag, 200);
+    if (!calendarId || !eventId) return fail("bad_request", "`calendarId` and `eventId` are required.", 400, origin);
+
+    const tok = await writableToken(db, userId);
+    if ("error" in tok) return fail(tok.error, tok.message, 400, origin);
+
+    const cur = await timedFetch(eventUrl(calendarId, eventId), {
+      headers: { Authorization: `Bearer ${tok.token}` },
+    });
+    // Already gone is reported as such, never as a success.
+    if (cur.status === 404) return fail("not_found", "That event no longer exists.", 404, origin);
+    if (!cur.ok) return fail("provider_error", `Google returned ${cur.status}: ${await googleDetail(cur)}`, 502, origin);
+    const before = await cur.json();
+    if (before.status === "cancelled") return fail("not_found", "That event has already been removed.", 404, origin);
+    if (etag && before.etag && before.etag !== etag) {
+      log("event_delete_conflict", { reason: "etag" });
+      return fail("conflict", "That event changed in Google after the proposal was made, so it was left untouched.", 409, origin);
+    }
+
+    const headers: Record<string, string> = { Authorization: `Bearer ${tok.token}` };
+    if (before.etag) headers["If-Match"] = before.etag;
+
+    const r = await timedFetch(eventUrl(calendarId, eventId), { method: "DELETE", headers });
+    if (r.status === 412) {
+      log("event_delete_conflict", { reason: "if_match" });
+      return fail("conflict", "That event changed as the deletion was applied, so it was left untouched.", 409, origin);
+    }
+    // 410 Gone means someone else deleted it between our read and write.
+    if (r.status === 404 || r.status === 410) {
+      return fail("not_found", "That event no longer exists.", 404, origin);
+    }
+    if (!r.ok && r.status !== 204) {
+      log("event_delete_failed", { status: r.status });
+      return fail("provider_error", `Google returned ${r.status}: ${await googleDetail(r)}`, 502, origin);
+    }
+    log("event_deleted", {});
+    return json({ deleted: true, event: summarize(before) }, 200, origin);
   }
 
   return fail("bad_request", "Unknown action.", 400, origin);

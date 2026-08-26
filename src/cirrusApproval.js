@@ -226,7 +226,10 @@ function view(p, now = Date.now()) {
     createdAt: p.createdAt,
     expiresAt: p.expiresAt,
     secondsRemaining: Math.max(0, Math.round((Date.parse(p.expiresAt) - now) / 1000)),
-    proposal: p.proposal,
+    // `resolved` carries the provider identifiers execution needs; it is
+    // machinery, not something the UI should render, so it stays out of
+    // the view alongside the raw parameters.
+    proposal: p.proposal ? { ...p.proposal, resolved: undefined } : p.proposal,
     status: p.status,
   };
 }
@@ -264,10 +267,10 @@ export function createApprovalManager({ history = null } = {}) {
    * Route a structured intent. READ and CREATE execute immediately via
    * Stage 5. EDIT and DELETE become a pending transaction instead.
    */
-  function propose(intent, runtime = {}) {
+  async function propose(intent, runtime = {}) {
     clearExpired();
 
-    const result = executeCirrusAction(intent, { ...runtime, history });
+    const result = await executeCirrusAction(intent, { ...runtime, history });
     if (result.status !== "approval_required") return result;
 
     // Refuse to silently replace an existing pending action. The user
@@ -285,10 +288,21 @@ export function createApprovalManager({ history = null } = {}) {
     const params = intent?.parameters || {};
     const targetId = typeof params.id === "string" ? params.id : null;
 
-    // Fingerprint the target as it stands now, so we can tell at
-    // approval time whether it changed underneath us.
-    const fingerprint = targetId ? fingerprintTarget(name, runtime.data || {}, targetId) : null;
-    if (targetId && !fingerprint) {
+    /* Fingerprint the target as it stands now, so we can tell at
+       approval time whether it changed underneath us.
+
+       A record stored in FlightPlan is fingerprinted from the local
+       blob. A record stored in a provider — a Google Calendar event —
+       has already been identified and fingerprinted by the action's own
+       proposal, which is the only code that knows how to read it. Both
+       end up in the same place and are checked the same way. */
+    const remote = result.proposal?.resolved || null;
+    const fingerprint = remote
+      ? remote.fingerprint || null
+      : targetId
+      ? fingerprintTarget(name, runtime.data || {}, targetId)
+      : null;
+    if (!remote && targetId && !fingerprint) {
       return { status: "error", code: "target_missing", action: name, message: "That record no longer exists." };
     }
 
@@ -301,6 +315,10 @@ export function createApprovalManager({ history = null } = {}) {
       parameters: params,
       fingerprint,
       targetId,
+      // Identifiers the proposal resolved (which calendar, which event).
+      // Kept so execution acts on exactly what was shown to the user and
+      // never re-runs a search that could land somewhere else.
+      resolved: remote,
       proposal: result.proposal,
       createdAt: new Date(now).toISOString(),
       expiresAt: new Date(now + APPROVAL_WINDOW_MS).toISOString(),
@@ -326,7 +344,7 @@ export function createApprovalManager({ history = null } = {}) {
    * explicit { decision: "approve" | "reject" } from a button. Both
    * paths run the same rules; the button simply skips interpretation.
    */
-  function resolve(input, runtime = {}) {
+  async function resolve(input, runtime = {}) {
     clearExpired();
 
     if (!pending) {
@@ -384,7 +402,11 @@ export function createApprovalManager({ history = null } = {}) {
       summary: "approved by user",
     });
 
-    const result = executeProtectedAction(p.action, p.parameters, runtime, p.fingerprint);
+    /* Note the ordering above: `pending` was cleared synchronously,
+       before this await. A second approval arriving while the provider
+       round trip is in flight therefore finds nothing pending and
+       cannot run the action a second time. */
+    const result = await executeProtectedAction(p.action, p.parameters, runtime, p.fingerprint, p.resolved);
 
     if (result.status === "success") {
       note({
@@ -445,7 +467,8 @@ export function describeProposal(pendingView, data) {
 
   // Re-read the target so the preview reflects current state, not the
   // state at proposal time.
-  const live = proposal?.target?.id ? describeTarget(action, data || {}, proposal.target.id) : null;
+  const isRemote = proposal?.target?.kind === "google event";
+  const live = !isRemote && proposal?.target?.id ? describeTarget(action, data || {}, proposal.target.id) : null;
   const target = live || proposal?.target || null;
 
   const label = target
@@ -453,6 +476,8 @@ export function describeProposal(pendingView, data) {
       ? `Flashcard: "${target.front}"${target.topic ? ` (${target.topic})` : ""}`
       : target.kind === "goal"
       ? `Goal: "${target.title}"`
+      : target.kind === "google event"
+      ? `${target.title} · ${target.date}${target.when && target.when !== "—" ? ` · ${target.when}` : ""}`
       : `Logbook entry: ${target.date}${target.aircraft ? ` · ${target.aircraft}` : ""}`
     : action;
 
@@ -471,6 +496,10 @@ export function describeProposal(pendingView, data) {
     changes,
     effect: proposal?.effect || null,
     caution: proposal?.caution || null,
-    targetStillExists: Boolean(live),
+    // A remote record can't be re-read synchronously here; it is
+    // revalidated against the provider at execution time instead, which
+    // is where a change would actually matter.
+    targetStillExists: isRemote ? true : Boolean(live),
+    remote: isRemote,
   };
 }
