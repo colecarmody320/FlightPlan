@@ -18,7 +18,8 @@ import {
   invalidateGoogleCalendar,
   localTimeZone,
 } from "./googleCalendar.js";
-import { useVoiceInput, SPEECH_STATES } from "./cirrusSpeech.js";
+import { SPEECH_STATES } from "./cirrusSpeech.js";
+import { useCirrusVoiceInput, ENGINES } from "./cirrusVoiceInput.js";
 import { useCirrusVoice, diagnoseVoice } from "./cirrusVoice.js";
 import { useCirrusSession, SESSION_STATES } from "./cirrusSession.js";
 import { CIRRUS_LIMIT_CODES } from "./cirrusService.js";
@@ -563,7 +564,11 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
     sessionRef.current?.handleRecognitionEnd?.(info);
   }, []);
 
-  const mic = useVoiceInput({
+  /* Stage 9: the engine is chosen per browser — recorded capture on
+     iOS, where Safari's recognizer cannot hold a conversation, and
+     webkitSpeechRecognition everywhere it is dependable. The session
+     below cannot tell which one it is driving. */
+  const mic = useCirrusVoiceInput({
     enabled: voiceAllowed,
     onTranscript: handleTranscript,
     onEnd: handleRecognitionEnd,
@@ -778,6 +783,8 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
                             ? "Cirrus is speaking…"
                             : session.state === SESSION_STATES.THINKING
                             ? "Thinking…"
+                            : session.state === SESSION_STATES.TRANSCRIBING
+                            ? "Getting that down…"
                             : mic.interim
                             ? mic.interim
                             : "Listening — just talk."}
@@ -835,7 +842,7 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
                     {mic.error && (
                       <div className="cirrus-error" role="status">
                         <p className="cirrus-error-msg">{mic.error.message}</p>
-                        {mic.state === SPEECH_STATES.DENIED && (
+                        {(mic.state === SPEECH_STATES.DENIED || mic.state === "denied") && (
                           <p className="cirrus-error-detail">
                             Typing still works. Cirrus won't ask again this session.
                           </p>
@@ -937,8 +944,10 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
                     {mode === CIRRUS_MODES.COMPANION && mic.supported && !session.running && !voiceSession && (
                       <p className="cirrus-note dim">
                         Tap the microphone once to start talking — Cirrus keeps listening
-                        between replies. Your device transcribes the audio; FlightPlan never
-                        records or stores it.
+                        between replies.{" "}
+                        {mic.onDevice
+                          ? "Your device transcribes the audio; FlightPlan never records or stores it."
+                          : "Each thing you say is sent to FlightPlan's server to be transcribed, then discarded — it is never saved."}
                       </p>
                     )}
                     {mode === CIRRUS_MODES.QUIET && (
@@ -1043,6 +1052,9 @@ export const CIRRUS_CSS = `
 .cirrus-session-dot.listening{ background:var(--lamp); animation:cirrusSessionPulse 1.4s ease-in-out infinite; }
 .cirrus-session-dot.thinking{ background:var(--green-bright); animation:cirrusSessionPulse .7s ease-in-out infinite; }
 .cirrus-session-dot.speaking{ background:var(--bone); animation:cirrusSessionPulse .5s ease-in-out infinite; }
+/* Transcribing: work is happening, but the microphone is already shut —
+   a slower pulse than listening, so the two never read the same. */
+.cirrus-session-dot.transcribing{ background:var(--lamp); animation:cirrusSessionPulse 1s ease-in-out infinite; opacity:.7; }
 /* Hollow and still: the visual opposite of every listening state. */
 .cirrus-session-dot.paused{
   background:transparent; box-shadow:inset 0 0 0 1.5px var(--muted); animation:none;

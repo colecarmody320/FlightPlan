@@ -40,6 +40,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 export const SESSION_STATES = {
   OFF: "off",
   LISTENING: "listening",
+  /* The recorded engine has a step recognition does not: the utterance
+     is over, but the words have not come back yet. Shown separately
+     because "Thinking…" would be a lie — Cirrus has not been asked
+     anything yet. */
+  TRANSCRIBING: "transcribing",
   THINKING: "thinking",
   SPEAKING: "speaking",
   PAUSED: "paused",
@@ -219,6 +224,14 @@ export function useCirrusSession({ enabled = false, mic, tts, runTurn, onEnded }
            even though start() would also refuse. */
         if (micRef.current?.listening) {
           setState(SESSION_STATES.LISTENING);
+          return;
+        }
+        /* A recorded utterance is still being transcribed. That cycle
+           has not reported its outcome yet, and opening a new one over
+           it is how the same sentence gets asked twice. */
+        if (micRef.current?.transcribing) {
+          setState(SESSION_STATES.TRANSCRIBING);
+          resumeContinuousListening(200);
           return;
         }
         const r = micRef.current?.start?.();
@@ -471,8 +484,9 @@ export function useCirrusSession({ enabled = false, mic, tts, runTurn, onEnded }
     if (pausedRef.current) return;
     if (tts?.speaking) setState(SESSION_STATES.SPEAKING);
     else if (turnLock.current) setState(SESSION_STATES.THINKING);
+    else if (mic?.transcribing) setState(SESSION_STATES.TRANSCRIBING);
     else if (mic?.listening) setState(SESSION_STATES.LISTENING);
-  }, [tts?.speaking, mic?.listening]);
+  }, [tts?.speaking, mic?.listening, mic?.transcribing]);
 
   return {
     state,
