@@ -58,6 +58,14 @@ const MESSAGES = {
 
 const friendly = (code) => MESSAGES[code] || MESSAGES[CIRRUS_ERRORS.UNKNOWN];
 
+/** Codes that mean "stop asking for now", not "something broke". */
+export const CIRRUS_LIMIT_CODES = new Set([
+  CIRRUS_ERRORS.RATE_LIMITED,
+  CIRRUS_ERRORS.DAILY_LIMIT,
+  CIRRUS_ERRORS.BUSY,
+  CIRRUS_ERRORS.PROVIDER_RATE_LIMITED,
+]);
+
 const fail = (code, detail) => ({
   ok: false,
   code,

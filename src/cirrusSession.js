@@ -64,6 +64,7 @@ export const END_REASONS = {
   IDLE: "idle",
   MAX_DURATION: "max_duration",
   ERRORS: "errors",
+  LIMIT: "limit",
   DENIED: "denied",
   UNAVAILABLE: "unavailable",
   MODE: "mode",
@@ -73,6 +74,7 @@ export const END_MESSAGES = {
   [END_REASONS.IDLE]: "I've stopped listening — it went quiet for a while.",
   [END_REASONS.MAX_DURATION]: "I've ended the voice session. Start another whenever you like.",
   [END_REASONS.ERRORS]: "I've stopped listening — the microphone kept failing. Typing still works.",
+  [END_REASONS.LIMIT]: "I've stopped listening — Cirrus has reached its request limit. Typing will work again once it clears.",
   [END_REASONS.DENIED]: "I can't listen without microphone access. Typing still works.",
   [END_REASONS.UNAVAILABLE]: "This browser can't keep listening. Typing still works.",
 };
@@ -209,15 +211,22 @@ export function useCirrusSession({ enabled = false, mic, tts, runTurn, onEnded }
       micRef.current?.cancel?.();
       setState(SESSION_STATES.THINKING);
 
+      let limited = false;
       try {
-        await runTurnRef.current?.(text, meta);
+        const outcome = await runTurnRef.current?.(text, meta);
+        /* A rate limit ends the session deliberately. Reopening the
+           microphone would invite another rejected request every time
+           the user spoke, which is noisy for them and pointless for the
+           limiter — the answer is to stop, and say so. */
+        if (outcome && outcome.limited) limited = true;
       } catch {
         // A failed turn is not a reason to abandon the conversation.
         errorsRef.current += 1;
       } finally {
         turnLock.current = false;
         if (activeRef.current) {
-          if (errorsRef.current >= ERROR_BUDGET) end(END_REASONS.ERRORS);
+          if (limited) end(END_REASONS.LIMIT);
+          else if (errorsRef.current >= ERROR_BUDGET) end(END_REASONS.ERRORS);
           else listenAgain();
         }
       }

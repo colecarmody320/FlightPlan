@@ -21,6 +21,7 @@ import {
 import { useVoiceInput, SPEECH_STATES } from "./cirrusSpeech.js";
 import { useCirrusVoice, diagnoseVoice } from "./cirrusVoice.js";
 import { useCirrusSession, SESSION_STATES } from "./cirrusSession.js";
+import { CIRRUS_LIMIT_CODES } from "./cirrusService.js";
 
 /* ============================================================
    CIRRUS — personal assistant layer
@@ -470,6 +471,13 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
       // lands here: the change stays pending and "yes, but which card?"
       // asks rather than executes.
       const result = await conversation.send(text);
+
+      /* Hitting a limit is not a fault to retry through. Reported to
+         the caller so a hands-free session stops rather than listening
+         again and inviting another rejected request. */
+      if (result && !result.ok && CIRRUS_LIMIT_CODES.has(result.code)) {
+        return { limited: true, code: result.code };
+      }
       let replyAudio = null;
       if (result?.ok && voiceAllowed && voiceSession) {
         // The reply is already rendered; speaking it is a separate,

@@ -20,13 +20,20 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.112.4";
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_MESSAGE_CHARS = 4000;
 const MAX_SYSTEM_PROMPT_CHARS = 24000; // personality + action catalogue + read-only app context
+/* Beyond this the payload is not a prompt that got large; it is
+   something else, and it is refused rather than trimmed. */
+const MAX_SYSTEM_PROMPT_HARD_CHARS = 80000;
 const MAX_HISTORY_MESSAGES = 20;
 const MAX_HISTORY_CHARS = 12000;
 const MAX_REPLY_CHARS = 8000;
 
 const DEFAULT_MAX_OUTPUT_TOKENS = 800;
 const DEFAULT_TIMEOUT_MS = 20000;
-const DEFAULT_RATE_LIMIT_PER_MINUTE = 20;
+const DEFAULT_RATE_LIMIT_PER_MINUTE = 10;
+const DEFAULT_RATE_LIMIT_PER_DAY = 500;
+/* Longer than the provider timeout, so a lease only ever expires for a
+   request that genuinely died rather than one still working. */
+const CONCURRENCY_LEASE_SECONDS = 45;
 const RATE_WINDOW_MS = 60_000;
 const MAX_ATTEMPTS = 2; // one initial try plus one conservative retry
 
@@ -50,6 +57,8 @@ type CirrusErrorCode =
   | "forbidden"
   | "bad_request"
   | "rate_limited"
+  | "daily_limit"
+  | "busy"
   | "provider_rate_limited"
   | "provider_timeout"
   | "provider_blocked"
@@ -86,6 +95,10 @@ class CirrusProviderError extends Error {
   }
 }
 
+/* Trimmed, because a trailing newline pasted into the dashboard is
+   invisible and has already cost this project a debugging session. */
+const envStr = (name: string) => (Deno.env.get(name) ?? "").trim();
+
 const envInt = (name: string, fallback: number) => {
   const raw = Deno.env.get(name);
   const n = raw ? Number(raw) : NaN;
@@ -118,12 +131,21 @@ function validate(raw: unknown): ChatRequest {
     throw bad(`\`message\` exceeds ${MAX_MESSAGE_CHARS} characters`);
   }
 
-  const systemPrompt = body.systemPrompt;
+  let systemPrompt = body.systemPrompt;
   if (typeof systemPrompt !== "string" || !systemPrompt.trim()) {
     throw bad("`systemPrompt` must be a non-empty string");
   }
+  /* The system prompt carries read-only app context, whose size varies
+     with how much data the user has. Refusing the whole turn because
+     they own a lot of flashcards would be a poor trade, so this is
+     trimmed rather than rejected — but only up to a point: past the
+     hard ceiling the payload is not plausibly a prompt and is refused
+     outright, before any provider call. */
+  if (systemPrompt.length > MAX_SYSTEM_PROMPT_HARD_CHARS) {
+    throw bad(`\`systemPrompt\` exceeds ${MAX_SYSTEM_PROMPT_HARD_CHARS} characters`);
+  }
   if (systemPrompt.length > MAX_SYSTEM_PROMPT_CHARS) {
-    throw bad(`\`systemPrompt\` exceeds ${MAX_SYSTEM_PROMPT_CHARS} characters`);
+    systemPrompt = `${systemPrompt.slice(0, MAX_SYSTEM_PROMPT_CHARS)}\n[context truncated]`;
   }
 
   const rawHistory = body.history ?? [];
@@ -478,6 +500,131 @@ function log(event: string, fields: Record<string, unknown>) {
 const userTag = (id: string) => id.slice(0, 8);
 
 
+
+/* ============================================================
+   DURABLE RATE LIMITING
+
+   Every Gemini request passes through this, and nothing reaches Gemini
+   without it — so a rejected request costs nothing at the provider.
+
+   State lives in Postgres rather than in this process. Edge Functions
+   scale horizontally and are recycled freely, so a per-instance counter
+   means the real ceiling is the limit multiplied by however many
+   instances exist, and it resets on every cold start. Postgres gives
+   one shared counter, and row locking makes check-and-increment atomic,
+   so two requests arriving together cannot both pass a check only one
+   of them should.
+
+   The user id comes from a validated Supabase session, never from the
+   request body: the caller cannot nominate whose quota to spend.
+
+   Defence in depth. Google's own quotas and the account spend cap are
+   the real backstop; this exists so ordinary faults — a retry storm, a
+   loop in the client — cannot quietly run up a bill against them.
+   ============================================================ */
+type LimitDecision = {
+  allowed: boolean;
+  reason?: "minute" | "daily" | "concurrent" | "unavailable";
+  retryAfter?: number;
+  minuteCount?: number;
+  dayCount?: number;
+  degraded?: boolean;
+};
+
+function serviceClient() {
+  const url = envStr("SUPABASE_URL");
+  const key = envStr("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) return null;
+  return createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
+}
+
+/* Per-instance fallback, used only when the database cannot be reached.
+   Weaker than the shared counter — it is per instance — but far better
+   than no limit at all, and the degradation is logged so it is visible
+   rather than silent. */
+const localHits = new Map<string, number[]>();
+function localLimited(userId: string, perMinute: number): boolean {
+  const now = Date.now();
+  const recent = (localHits.get(userId) ?? []).filter((t) => now - t < RATE_WINDOW_MS);
+  if (recent.length >= perMinute) {
+    localHits.set(userId, recent);
+    return true;
+  }
+  recent.push(now);
+  localHits.set(userId, recent);
+  if (localHits.size > 500) {
+    for (const [k, v] of localHits) {
+      if (!v.some((t) => now - t < RATE_WINDOW_MS)) localHits.delete(k);
+    }
+  }
+  return false;
+}
+
+/** Takes a slot, or explains why not. Also takes the concurrency lease. */
+async function acquireSlot(
+  db: ReturnType<typeof createClient> | null,
+  userId: string,
+  perMinute: number,
+  perDay: number,
+): Promise<LimitDecision> {
+  if (db) {
+    const { data, error } = await db.rpc("cirrus_rate_acquire", {
+      p_user: userId,
+      p_rpm: perMinute,
+      p_rpd: perDay,
+      p_lease_seconds: CONCURRENCY_LEASE_SECONDS,
+    });
+    if (!error && data && typeof data === "object") {
+      const d = data as Record<string, unknown>;
+      return {
+        allowed: Boolean(d.allowed),
+        reason: d.reason as LimitDecision["reason"],
+        retryAfter: typeof d.retry_after === "number" ? d.retry_after : undefined,
+        minuteCount: typeof d.minute_count === "number" ? d.minute_count : undefined,
+        dayCount: typeof d.day_count === "number" ? d.day_count : undefined,
+      };
+    }
+    // The migration has not been applied, or the database is unreachable.
+    log("limiter_degraded", { reason: error?.code || "no_data", detail: error?.message?.slice(0, 120) });
+  }
+  return localLimited(userId, perMinute)
+    ? { allowed: false, reason: "minute", retryAfter: 30, degraded: true }
+    : { allowed: true, degraded: true };
+}
+
+/** Charges a retry. A retry is a Gemini request and is billed as one. */
+async function chargeRetry(
+  db: ReturnType<typeof createClient> | null,
+  userId: string,
+  perMinute: number,
+  perDay: number,
+): Promise<boolean> {
+  if (!db) return !localLimited(userId, perMinute);
+  const { data, error } = await db.rpc("cirrus_rate_charge", {
+    p_user: userId, p_rpm: perMinute, p_rpd: perDay,
+  });
+  if (error || !data || typeof data !== "object") return !localLimited(userId, perMinute);
+  return Boolean((data as Record<string, unknown>).allowed);
+}
+
+/** Releases the concurrency lease. Never throws: a failure here must
+    not turn a served request into an error. */
+async function releaseSlot(db: ReturnType<typeof createClient> | null, userId: string) {
+  if (!db) return;
+  try {
+    await db.rpc("cirrus_rate_release", { p_user: userId });
+  } catch {
+    // The lease expires on its own; nothing is wedged.
+  }
+}
+
+const LIMIT_MESSAGES: Record<string, string> = {
+  minute: "Cirrus is taking a breather — you've reached the per-minute limit. Try again in a moment.",
+  daily: "Cirrus has reached today's request limit. It resets at midnight UTC.",
+  concurrent: "Cirrus is still working on your last message. Give it a second.",
+  unavailable: "Cirrus can't check its usage limits right now. Try again shortly.",
+};
+
 /* ============================================================
    ACTION EXTRACTION
 
@@ -568,24 +715,47 @@ Deno.serve(async (req: Request) => {
     return errorResponse("forbidden", "This account cannot use Cirrus", 403, origin);
   }
 
-  /* --- throttle --- */
+  /* --- throttle ---
+     Before parsing, before building a prompt, and well before any
+     provider call: a rejected request must cost nothing at Gemini.
+     `user.id` comes from the validated session above, so the caller
+     cannot spend someone else's quota by naming them. */
   const perMinute = envInt("CIRRUS_RATE_LIMIT_PER_MINUTE", DEFAULT_RATE_LIMIT_PER_MINUTE);
-  if (rateLimited(user.id, perMinute)) {
-    log("rate_limited", { user: userTag(user.id), perMinute });
-    return errorResponse(
-      "rate_limited",
-      "Too many requests in a short window. Give it a moment.",
-      429,
-      origin,
-    );
+  const perDay = envInt("CIRRUS_RATE_LIMIT_PER_DAY", DEFAULT_RATE_LIMIT_PER_DAY);
+  const db = serviceClient();
+
+  const slot = await acquireSlot(db, user.id, perMinute, perDay);
+  if (!slot.allowed) {
+    const reason = slot.reason || "minute";
+    log("rate_limited", {
+      user: userTag(user.id),
+      reason,
+      perMinute,
+      perDay,
+      minuteCount: slot.minuteCount,
+      dayCount: slot.dayCount,
+      degraded: Boolean(slot.degraded),
+    });
+    const code: CirrusErrorCode =
+      reason === "daily" ? "daily_limit" : reason === "concurrent" ? "busy" : "rate_limited";
+    const res = errorResponse(code, LIMIT_MESSAGES[reason] || LIMIT_MESSAGES.minute, 429, origin);
+    if (slot.retryAfter) res.headers.set("Retry-After", String(slot.retryAfter));
+    return res;
   }
+
+  /* From here every exit must release the concurrency lease, or the
+     next request is refused until the lease expires. */
+  const finish = async <T>(r: T): Promise<T> => {
+    await releaseSlot(db, user.id);
+    return r;
+  };
 
   /* --- parse and validate --- */
   let parsed: ChatRequest;
   try {
     const rawBody = await req.text();
     if (rawBody.length > MAX_BODY_BYTES) {
-      return errorResponse("bad_request", "Request body too large", 413, origin);
+      return await finish(errorResponse("bad_request", "Request body too large", 413, origin));
     }
     let json: unknown;
     try {
@@ -598,7 +768,7 @@ Deno.serve(async (req: Request) => {
     const e = err as CirrusProviderError;
     const code = e?.code ?? "bad_request";
     log("bad_request", { user: userTag(user.id), code });
-    return errorResponse(code, e?.message ?? "Malformed request", e?.status ?? 400, origin);
+    return await finish(errorResponse(code, e?.message ?? "Malformed request", e?.status ?? 400, origin));
   }
 
   /* --- call the provider --- */
@@ -612,7 +782,7 @@ Deno.serve(async (req: Request) => {
     const e = err as CirrusProviderError;
     log("misconfigured", { reason: e?.code ?? "provider_unavailable", detail: e?.message });
     // Never surface the underlying message — it can name env vars.
-    return errorResponse("server_misconfigured", "Cirrus is not configured", 500, origin);
+    return await finish(errorResponse("server_misconfigured", "Cirrus is not configured", 500, origin));
   }
 
   let lastError: CirrusProviderError | null = null;
@@ -642,7 +812,7 @@ Deno.serve(async (req: Request) => {
         ms: Date.now() - started,
       });
 
-      return jsonResponse(
+      return await finish(jsonResponse(
         {
           reply,
           /* Declares that this deployment understands the action
@@ -662,7 +832,7 @@ Deno.serve(async (req: Request) => {
         },
         200,
         origin,
-      );
+      ));
     } catch (err) {
       lastError = err instanceof CirrusProviderError
         ? err
@@ -686,11 +856,21 @@ Deno.serve(async (req: Request) => {
       });
 
       if (!willRetry) break;
+
+      /* A retry costs quota. Without this the limiter would cap
+         "messages" rather than "Gemini requests", and a retry would be
+         free — which is the exact hole worth closing. Running out here
+         stops the retry rather than queueing behind the limiter. */
+      const mayRetry = await chargeRetry(db, user.id, perMinute, perDay);
+      if (!mayRetry) {
+        log("retry_denied", { user: userTag(user.id), attempt, reason: "quota" });
+        break;
+      }
       await new Promise((r) => setTimeout(r, 400 + Math.random() * 300));
     }
   }
 
   const e = lastError ?? new CirrusProviderError("unknown", "Unexpected failure");
   const clientMessage = e.code === "server_misconfigured" ? "Cirrus is not configured" : e.message;
-  return errorResponse(e.code, clientMessage, e.status, origin);
+  return await finish(errorResponse(e.code, clientMessage, e.status, origin));
 });
