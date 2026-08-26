@@ -35,7 +35,12 @@ export const TTS_ERRORS = {
   provider_error: "Cirrus's voice is unavailable right now.",
   /* Named separately because each one has a different fix, and the
      user is the only person who can apply any of them. */
-  provider_quota: "Cirrus's voice is out of ElevenLabs credit for this billing period.",
+  provider_quota: "Cirrus's voice has used its ElevenLabs allowance for this period.",
+  // 402 is not proof of an empty balance — it also covers plan
+  // entitlement and access restrictions. The detail line carries
+  // ElevenLabs' own verdict; this sentence must not pre-empt it.
+  provider_payment_required: "ElevenLabs refused this request.",
+  provider_blocked: "ElevenLabs has blocked API speech for this account.",
   provider_auth: "ElevenLabs rejected the API key.",
   provider_voice_missing: "The configured Cirrus voice no longer exists on ElevenLabs.",
   provider_rate_limited: "ElevenLabs is rate limiting Cirrus's voice.",
