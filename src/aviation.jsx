@@ -1182,7 +1182,9 @@ const CERT_REQS = {
   },
 };
 
-function totals(flights) {
+// Exported so Cirrus's context layer reports the same logbook totals the
+// Flying tab shows, rather than recomputing them and risking drift.
+export function totals(flights) {
   const t = {
     total: 0, dual: 0, pic: 0, solo: 0, xc: 0, night: 0,
     actualInst: 0, simInst: 0, sim: 0, dayLdg: 0, nightLdg: 0, approaches: 0,
@@ -1197,7 +1199,7 @@ function totals(flights) {
   return t;
 }
 
-function currency(flights, pilot) {
+export function currency(flights, pilot) {
   const today = todayISO();
   const within = (days) => flights.filter((f) => daysBetween(f.date, today) <= days);
 
@@ -1576,28 +1578,34 @@ function Minimums({ data, update }) {
 /* ============================================================
    WEAK TOPICS + EXAM READINESS
    ============================================================ */
-export function ReadinessView({ data, start, helpers }) {
-  const { live, courseGrade } = helpers;
+/* Pure readiness scoring, extracted from ReadinessView so Cirrus's
+   context layer reports the exact numbers the Readiness screen shows.
+   Duplicating this formula would let the two drift apart, and readiness
+   is meant to be authoritative. Read-only: derives from `data`, never
+   mutates it. */
+export function readinessScores(data, helpers) {
+  const { live } = helpers;
   const today = todayISO();
+  const cards = data.cards || [];
 
   const courses = live(data).map((c) => {
-    const cards = data.cards.filter((x) => x.courseId === c.id);
-    const seen = cards.reduce((s, x) => s + num(x.seen), 0);
-    const missed = cards.reduce((s, x) => s + num(x.missed), 0);
-    const avgBox = cards.length
-      ? cards.reduce((s, x) => s + num(x.box), 0) / cards.length
+    const mine = cards.filter((x) => x.courseId === c.id);
+    const seen = mine.reduce((s, x) => s + num(x.seen), 0);
+    const missed = mine.reduce((s, x) => s + num(x.missed), 0);
+    const avgBox = mine.length
+      ? mine.reduce((s, x) => s + num(x.box), 0) / mine.length
       : 0;
     const accuracy = seen ? 1 - missed / seen : 0;
-    const coverage = Math.min(1, cards.length / 40);
+    const coverage = Math.min(1, mine.length / 40);
     const maturity = avgBox / 5;
-    const dueNow = cards.filter((x) => !x.due || x.due <= today).length;
-    const backlog = cards.length ? 1 - dueNow / cards.length : 1;
+    const dueNow = mine.filter((x) => !x.due || x.due <= today).length;
+    const backlog = mine.length ? 1 - dueNow / mine.length : 1;
 
     const score = Math.round(
       100 * (coverage * 0.25 + maturity * 0.3 + accuracy * 0.3 + backlog * 0.15)
     );
     const label =
-      cards.length === 0
+      mine.length === 0
         ? "No cards yet"
         : score >= 80
         ? "Exam ready"
@@ -1607,11 +1615,11 @@ export function ReadinessView({ data, start, helpers }) {
         ? "Needs work"
         : "Not ready";
 
-    return { course: c, cards, score, label, accuracy, avgBox, dueNow, seen };
+    return { course: c, cards: mine, score, label, accuracy, avgBox, dueNow, seen };
   });
 
   const topics = {};
-  data.cards.forEach((c) => {
+  cards.forEach((c) => {
     if (!num(c.seen)) return;
     const key = `${c.courseId}||${c.topic || "untagged"}`;
     topics[key] = topics[key] || { ids: [], seen: 0, missed: 0 };
@@ -1623,12 +1631,19 @@ export function ReadinessView({ data, start, helpers }) {
   const weak = Object.entries(topics)
     .map(([key, v]) => {
       const [courseId, topic] = key.split("||");
-      const code = data.courses.find((c) => c.id === courseId)?.code || "—";
+      const code = (data.courses || []).find((c) => c.id === courseId)?.code || "—";
       return { key, code, topic, ...v, rate: v.missed / v.seen };
     })
     .filter((x) => x.seen >= 3 && x.rate > 0)
     .sort((a, b) => b.rate - a.rate)
     .slice(0, 8);
+
+  return { courses, weak };
+}
+
+export function ReadinessView({ data, start, helpers }) {
+  const { live } = helpers;
+  const { courses, weak } = readinessScores(data, { live });
 
   return (
     <div>
