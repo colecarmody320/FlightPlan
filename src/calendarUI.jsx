@@ -18,6 +18,7 @@ import {
   EVENT_TYPES,
   CALENDAR_SOURCES,
 } from "./calendar.js";
+import { useGoogleCalendar } from "./googleCalendar.js";
 
 /* ============================================================
    CALENDAR UI
@@ -134,10 +135,77 @@ function TimedBlock({ item, bounds, onOpen }) {
   );
 }
 
+/* ---------- Google source panel ----------
+   Connection state and calendar picker. Read-only: selecting calendars
+   only records a display preference; nothing in Google is modified. */
+function GoogleSource({ g }) {
+  const [open, setOpen] = useState(false);
+
+  const openPicker = async () => {
+    setOpen(true);
+    if (!g.calendars.length) await g.loadCalendars();
+  };
+
+  const toggle = (id) => {
+    const next = g.selected.includes(id)
+      ? g.selected.filter((x) => x !== id)
+      : [...g.selected, id];
+    g.selectCalendars(next);
+  };
+
+  return (
+    <div className="cal-src">
+      <span className="cal-dot" style={{ background: g.connected ? "#7FB2D4" : "var(--edge)" }} />
+      <span className="cal-src-name">Google Calendar</span>
+      <span className="cal-src-state">
+        {g.connected ? (g.busy ? "syncing…" : "connected") : "not connected"}
+      </span>
+
+      {g.connected ? (
+        <>
+          <button type="button" className="cal-src-btn" onClick={openPicker}>Calendars</button>
+          <button type="button" className="cal-src-btn" onClick={g.refresh} disabled={g.busy}>
+            Refresh
+          </button>
+          <button type="button" className="cal-src-btn" onClick={g.disconnect}>Disconnect</button>
+        </>
+      ) : (
+        <button type="button" className="cal-src-btn primary" onClick={g.connect}>Connect</button>
+      )}
+
+      {g.error && <span className="cal-src-err">{g.error.message}</span>}
+
+      {open && g.connected && (
+        <div className="cal-src-picker">
+          <p className="cal-src-picker-h">
+            Show these calendars
+            <button type="button" className="cal-icon-btn" onClick={() => setOpen(false)}>✕</button>
+          </p>
+          {g.calendars.length === 0 ? (
+            <p className="cal-note">Loading your calendars…</p>
+          ) : (
+            g.calendars.map((c) => {
+              // Empty selection means "primary only" on the server.
+              const on = g.selected.length ? g.selected.includes(c.id) : c.primary;
+              return (
+                <label key={c.id} className="cal-src-row">
+                  <input type="checkbox" checked={on} onChange={() => toggle(c.id)} />
+                  <span>{c.name}</span>
+                  {c.primary && <span className="cal-src-tag">primary</span>}
+                </label>
+              );
+            })
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ============================================================
    CALENDAR TAB
    ============================================================ */
-export function CalendarTab({ data, externalEvents = [], focusDate = null }) {
+export function CalendarTab({ data, user = null, externalEvents = [], focusDate = null }) {
   const [anchor, setAnchor] = useState(focusDate || todayISO());
   const [selected, setSelected] = useState(null);
   const nowMin = useNowMinutes();
@@ -145,11 +213,19 @@ export function CalendarTab({ data, externalEvents = [], focusDate = null }) {
 
   const days = useMemo(() => weekDays(anchor), [anchor]);
 
+  // Google events for exactly the visible week, merged with anything
+  // the caller already passed in.
+  const g = useGoogleCalendar({ user, from: days[0], to: days[6] });
+  const merged = useMemo(
+    () => [...externalEvents, ...(g.events || [])],
+    [externalEvents, g.events]
+  );
+
   // Memoized on the week and the data identity, so panning weeks or
   // unrelated re-renders do not rebuild the whole schedule.
   const events = useMemo(
-    () => buildCalendarEvents(data, { from: days[0], to: days[6], externalEvents }),
-    [data, days, externalEvents]
+    () => buildCalendarEvents(data, { from: days[0], to: days[6], externalEvents: merged }),
+    [data, days, merged]
   );
 
   const bounds = useMemo(() => timeBounds(events), [events]);
@@ -175,6 +251,8 @@ export function CalendarTab({ data, externalEvents = [], focusDate = null }) {
         </button>
         <span className="cal-range">{formatRange(days)}</span>
       </div>
+
+      <GoogleSource g={g} />
 
       <div className="cal-scroll">
         <div className="cal-grid">
@@ -259,15 +337,20 @@ export function CalendarTab({ data, externalEvents = [], focusDate = null }) {
    HOME — THIS WEEK
    A compact seven-day strip. Same normalized source as the tab.
    ============================================================ */
-export function ThisWeekPanel({ data, externalEvents = [], go }) {
+export function ThisWeekPanel({ data, user = null, externalEvents = [], go }) {
   const [selected, setSelected] = useState(null);
   const nowMin = useNowMinutes();
   const today = todayISO();
   const days = useMemo(() => weekDays(today), [today]);
 
+  // Same hook and same week as the Calendar tab, so Home and Calendar
+  // always show identical data.
+  const g = useGoogleCalendar({ user, from: days[0], to: days[6] });
+  const merged = useMemo(() => [...externalEvents, ...(g.events || [])], [externalEvents, g.events]);
+
   const events = useMemo(
-    () => buildCalendarEvents(data, { from: days[0], to: days[6], externalEvents }),
-    [data, days, externalEvents]
+    () => buildCalendarEvents(data, { from: days[0], to: days[6], externalEvents: merged }),
+    [data, days, merged]
   );
 
   const bounds = useMemo(
@@ -459,6 +542,44 @@ export const CALENDAR_CSS = `
   .cal-detail-rows dt { flex: none; width: 74px; color: var(--faint); }
   .cal-detail-rows dd { margin: 0; color: var(--bone); min-width: 0; word-break: break-word; }
   .cal-open { display: inline-block; margin-top: 14px; font-size: 12px; color: var(--green-bright); }
+
+  /* ---------- source panel ---------- */
+  .cal-src {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 8px 12px; margin-bottom: 12px;
+    border: 1px solid var(--line); border-radius: 10px;
+    background: rgba(127,178,212,.05); position: relative;
+  }
+  .cal-src-name { font-size: 12.5px; color: var(--bone); font-weight: 500; }
+  .cal-src-state { font-size: 11px; color: var(--faint); }
+  .cal-src-btn {
+    border: 1px solid var(--edge); background: none; color: var(--muted);
+    font-size: 11.5px; padding: 4px 10px; border-radius: 999px; cursor: pointer;
+  }
+  .cal-src-btn:hover:not([disabled]) { color: var(--bone); border-color: var(--lamp); }
+  .cal-src-btn[disabled] { opacity: .4; cursor: default; }
+  .cal-src-btn.primary { color: var(--green-bright); border-color: var(--green); }
+  .cal-src-err { font-size: 11px; color: var(--alert); flex-basis: 100%; }
+
+  .cal-src-picker {
+    position: absolute; top: calc(100% + 6px); left: 0; z-index: 20;
+    width: min(320px, 92vw); background: var(--raised);
+    border: 1px solid var(--line); border-radius: 12px; padding: 12px;
+    box-shadow: 0 12px 32px rgba(0,0,0,.4);
+  }
+  .cal-src-picker-h {
+    display: flex; align-items: center; justify-content: space-between;
+    margin: 0 0 8px; font-size: 11px; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--faint);
+  }
+  .cal-src-row {
+    display: flex; align-items: center; gap: 8px; padding: 5px 0;
+    font-size: 12.5px; color: var(--bone); cursor: pointer;
+  }
+  .cal-src-tag {
+    font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--faint); margin-left: auto;
+  }
 
   /* ---------- home: this week ---------- */
   .tw { margin-bottom: 4px; }
