@@ -198,6 +198,70 @@ Deno.serve(async (req: Request) => {
     return errorResponse("rate_limited", "Too much speech in a short window.", 429, origin);
   }
 
+  /* --- diagnostics ---
+     Answers "why is the voice failing?" without ever returning a
+     secret. It reports whether each secret is present, which models
+     this ElevenLabs account can actually use, and whether the
+     configured model is one of them. The key is never echoed; the
+     voice id is reduced to a fingerprint so it can be told apart from
+     a different one without being disclosed. */
+  if (new URL(req.url).searchParams.get("action") === "diagnose") {
+    const key = envStr("ELEVENLABS_API_KEY");
+    const voice = envStr("ELEVENLABS_VOICE_ID");
+    const configuredModel = envStr("ELEVENLABS_MODEL_ID") || DEFAULT_MODEL_ID;
+    const out: Record<string, unknown> = {
+      hasApiKey: Boolean(key),
+      hasVoiceId: Boolean(voice),
+      voiceIdFingerprint: voice ? `…${voice.slice(-4)} (${voice.length} chars)` : null,
+      configuredModel,
+      usingDefaultModel: !envStr("ELEVENLABS_MODEL_ID"),
+    };
+    if (!key) {
+      out.problem = "ELEVENLABS_API_KEY is not set on this function.";
+      return json(out, 200, origin);
+    }
+
+    try {
+      const mr = await timedFetch("https://api.elevenlabs.io/v1/models", {
+        headers: { "xi-api-key": key },
+      });
+      out.modelsStatus = mr.status;
+      if (mr.ok) {
+        const models = await mr.json();
+        const usable = (Array.isArray(models) ? models : [])
+          .filter((m: any) => m?.can_do_text_to_speech !== false)
+          .map((m: any) => m?.model_id)
+          .filter(Boolean);
+        out.availableTextToSpeechModels = usable;
+        out.configuredModelIsAvailable = usable.includes(configuredModel);
+        if (!usable.includes(configuredModel)) {
+          out.problem = `ELEVENLABS_MODEL_ID "${configuredModel}" is not one this account can use. Set it to one of availableTextToSpeechModels.`;
+        }
+      } else {
+        out.problem = `ElevenLabs rejected the key: ${await providerDetail2(mr)}`;
+      }
+    } catch (err) {
+      out.problem = `Could not reach ElevenLabs: ${(err as Error)?.message || "network error"}`;
+    }
+
+    if (voice) {
+      try {
+        const vr = await timedFetch(
+          `https://api.elevenlabs.io/v1/voices/${encodeURIComponent(voice)}`,
+          { headers: { "xi-api-key": key } },
+        );
+        out.voiceStatus = vr.status;
+        out.voiceIdIsValid = vr.ok;
+        if (!vr.ok) out.problem = `ELEVENLABS_VOICE_ID is not usable: ${await providerDetail2(vr)}`;
+      } catch {
+        out.voiceIdIsValid = null;
+      }
+    }
+
+    log("diagnose", { user: userTag(user.id), hasKey: Boolean(key), hasVoice: Boolean(voice) });
+    return json(out, 200, origin);
+  }
+
   /* --- parse --- */
   let text: string;
   try {

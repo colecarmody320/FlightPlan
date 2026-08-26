@@ -202,6 +202,10 @@ export async function sendCirrusMessage({
     ok: true,
     reply,
     action,
+    // Whether the deployed backend can carry an action at all. False
+    // means any claim in the reply about having changed something is
+    // necessarily untrue, because there was no channel for it.
+    actionChannel: result.data?.contract === "cirrus-action-v1",
     model: result.data?.model,
     truncated: Boolean(result.data?.truncated),
   };

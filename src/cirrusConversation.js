@@ -186,7 +186,12 @@ export function useCirrusConversation({ mode, page, selectedObject, getRequestEx
         // Returned so a caller can speak the reply. The transcript is
         // already updated either way — nothing downstream can delay or
         // suppress the text by acting on this.
-        return { ok: true, reply: result.reply, action: result.action || null };
+        return {
+          ok: true,
+          reply: result.reply,
+          action: result.action || null,
+          actionChannel: Boolean(result.actionChannel),
+        };
       }
 
       // A failure leaves the transcript and every byte of application

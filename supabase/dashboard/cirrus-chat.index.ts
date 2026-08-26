@@ -645,6 +645,12 @@ Deno.serve(async (req: Request) => {
       return jsonResponse(
         {
           reply,
+          /* Declares that this deployment understands the action
+             protocol. A client that does not see this marker knows the
+             function predates it and that no action can possibly have
+             run — which is the difference between "nothing happened"
+             and "something happened and I wasn't told". */
+          contract: "cirrus-action-v1",
           // Present only when Cirrus proposed something. It is an
           // unvalidated suggestion at this point: the browser's action
           // registry decides whether it exists, whether its parameters

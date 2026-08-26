@@ -5,6 +5,7 @@ import {
   createApprovalManager,
   describeProposal,
   classifyUtterance,
+  verifyClaim,
   ROUTES,
 } from "./cirrusApproval.js";
 import { createActionHistory, listActions } from "./cirrusActions.js";
@@ -18,7 +19,7 @@ import {
   localTimeZone,
 } from "./googleCalendar.js";
 import { useVoiceInput, SPEECH_STATES } from "./cirrusSpeech.js";
-import { useCirrusVoice } from "./cirrusVoice.js";
+import { useCirrusVoice, diagnoseVoice } from "./cirrusVoice.js";
 
 /* ============================================================
    CIRRUS — personal assistant layer
@@ -241,22 +242,43 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
      modules at construction, so in OFF and QUIET the microphone cannot
      be opened and no ElevenLabs request can be made — not merely
      hidden in the UI. */
-  const voiceAllowed = mode === CIRRUS_MODES.COMPANION;
+  /* Voice is live only while Companion is selected AND the panel is
+     open. The dock's toggle button stays mounted when the panel is
+     closed, so without the `open` term a session started here would
+     keep the microphone after the panel was dismissed — which is
+     exactly what it did. */
+  const voiceAllowed = mode === CIRRUS_MODES.COMPANION && open;
   // Set by the first deliberate mic tap. Until then Cirrus stays silent
   // even in Companion, so typing never unexpectedly starts talking.
   const [voiceSession, setVoiceSession] = useState(false);
   const [micNote, setMicNote] = useState(null);
+  const [voiceReport, setVoiceReport] = useState(null);
 
   const tts = useCirrusVoice({ enabled: voiceAllowed });
   const ttsRef = useRef(tts);
   ttsRef.current = tts;
+  // Assigned further down, once useVoiceInput has run. Held in a ref so
+  // setMode and the close/unmount paths can release synchronously.
+  const micRef = useRef(null);
 
   useEffect(() => {
     if (!voiceAllowed) {
       setVoiceSession(false);
       setMicNote(null);
+      micRef.current?.release();
+      ttsRef.current?.stop();
     }
   }, [voiceAllowed]);
+
+  // Unmounting the dock entirely — signing out, or the app tearing
+  // down — releases capture and stops playback too.
+  useEffect(
+    () => () => {
+      micRef.current?.release();
+      ttsRef.current?.stop();
+    },
+    []
+  );
 
   /* The Google Calendar client an action runs against.
 
@@ -365,8 +387,18 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
     return () => document.removeEventListener("keydown", onKey);
   }, [open, setOpen]);
 
-  const setMode = (m) =>
+  const setMode = (m) => {
+    /* Release before the state change, not as a consequence of it.
+       Waiting for `enabled` to flip through a render leaves the
+       microphone open across that gap, and OFF and QUIET must never
+       have it open for any interval at all. */
+    if (m !== CIRRUS_MODES.COMPANION) {
+      micRef.current?.release();
+      ttsRef.current?.stop();
+      setVoiceSession(false);
+    }
     update((d) => ({ ...d, cirrus: { ...(d.cirrus || blankCirrus()), mode: m } }));
+  };
 
   /* ============================================================
      THE SUBMIT PATH
@@ -429,12 +461,15 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
         ttsRef.current.speak(result.reply);
       }
 
+      if (!result?.ok) return;
+
       /* If Cirrus proposed something, run it through the gate. The
          reply text is already on screen and stays there whatever
          happens next — a rejected or impossible action changes what
          Cirrus says afterwards, never what it already said. */
-      if (result?.ok && result.action) {
-        const outcome = await proposeAction(result.action);
+      let outcome = null;
+      if (result.action) {
+        outcome = await proposeAction(result.action);
         if (outcome.status === "success") {
           say(describeOutcome(outcome));
         } else if (outcome.status === "error" || outcome.status === "unsupported") {
@@ -446,6 +481,17 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
         }
         // approval_required needs no line here: the card says it.
       }
+
+      /* Last line of defence. If the reply claimed a change but no
+         action ran, contradict it. Only this code knows what really
+         happened, so only this code can be trusted to say so. */
+      const correction = verifyClaim({
+        reply: result.reply,
+        action: result.action,
+        executed: outcome,
+        actionChannel: result.actionChannel,
+      });
+      if (correction) say(correction);
     },
     [conversation, say, resolveApproval, proposeAction, voiceAllowed, voiceSession]
   );
@@ -470,6 +516,7 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
   );
 
   const mic = useVoiceInput({ enabled: voiceAllowed, onTranscript: handleTranscript });
+  micRef.current = mic;
 
   /* One control, two jobs: stop if listening, otherwise start.
      `unlock()` runs synchronously inside the tap because iOS grants
@@ -652,7 +699,31 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
                     {tts.error && (
                       <div className="cirrus-error" role="status">
                         <p className="cirrus-error-msg">{tts.error.message}</p>
+                        {/* The actual cause, shown inline because there
+                            is no console to open on a tablet. */}
+                        {tts.error.detail && (
+                          <p className="cirrus-error-detail">
+                            {tts.error.code}: {tts.error.detail}
+                          </p>
+                        )}
                         <p className="cirrus-error-detail">The reply above is unaffected.</p>
+                        <button
+                          type="button"
+                          className="cirrus-chip live"
+                          onClick={async () => {
+                            setVoiceReport("Checking…");
+                            const r = await diagnoseVoice();
+                            setVoiceReport(
+                              r.ok
+                                ? r.report?.problem ||
+                                  `Configuration looks correct. Models available: ${(r.report?.availableTextToSpeechModels || []).join(", ") || "none reported"}.`
+                                : `${r.code}: ${r.detail || "no detail"}`
+                            );
+                          }}
+                        >
+                          Why?
+                        </button>
+                        {voiceReport && <p className="cirrus-error-detail">{voiceReport}</p>}
                       </div>
                     )}
 
