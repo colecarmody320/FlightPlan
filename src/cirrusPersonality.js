@@ -190,8 +190,21 @@ export function buildCirrusSystemPrompt({
   actions = null,
   appContext = null,
 } = {}) {
+  /* Stated as a plain sentence at the top rather than left inside the
+     JSON blob: "what day is it" is one of the most common things asked
+     of Cirrus, and the answer should not depend on the model digging a
+     field out of a nested payload. */
+  const now = appContext?.now;
+  const nowLine = now
+    ? `RIGHT NOW\nIt is ${now.weekday} ${now.date}, ${now.time} local time` +
+      `${now.timeZone ? ` (${now.timeZone})` : ""}. Treat this as the current ` +
+      `date and time. Every date and time you are given, and every one you ` +
+      `say, is the user's local time.`
+    : "";
+
   const parts = [
     CIRRUS_BASE_PERSONALITY,
+    nowLine,
     CIRRUS_OPERATING_MODE_INSTRUCTIONS[operatingMode] || "",
     CIRRUS_TASK_MODE_INSTRUCTIONS[taskMode] || CIRRUS_TASK_MODE_INSTRUCTIONS[CIRRUS_TASK_MODES.NORMAL],
     formatContext(context),

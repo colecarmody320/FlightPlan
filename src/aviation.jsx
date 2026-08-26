@@ -1381,7 +1381,7 @@ function Logbook({ data, update }) {
                     <td>{fmt1(x.night)}</td>
                     <td>{num(x.dayLdg) + num(x.nightLdg)}</td>
                     <td>
-                      <button className="cd-x" onClick={() => remove(x.id)}>×</button>
+                      <button className="cd-x" onClick={() => remove(x.id)} aria-label="Delete logbook flight" title="Delete">×</button>
                     </td>
                   </tr>
                 ))}

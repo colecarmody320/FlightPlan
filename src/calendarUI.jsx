@@ -5,7 +5,6 @@ import {
   layoutDay,
   timeBounds,
   weekDays,
-  weekStartISO,
   addDaysISO,
   todayISO,
   formatTime,
@@ -179,7 +178,7 @@ function GoogleSource({ g }) {
         <div className="cal-src-picker">
           <p className="cal-src-picker-h">
             Show these calendars
-            <button type="button" className="cal-icon-btn" onClick={() => setOpen(false)}>✕</button>
+            <button type="button" className="cal-icon-btn" onClick={() => setOpen(false)} aria-label="Close">✕</button>
           </p>
           {g.calendars.length === 0 ? (
             <p className="cal-note">Loading your calendars…</p>

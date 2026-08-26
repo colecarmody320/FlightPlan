@@ -250,6 +250,18 @@ const archived = (data) => data.courses.filter((c) => c.archived);
 
 /* ---------- cloud storage ---------- */
 
+/**
+ * Loads the user's FlightPlan.
+ *
+ * Returns an OUTCOME, not just data, and the distinction matters more
+ * than it looks: "there is no row yet" and "the request failed" both
+ * used to come back as null. A first-time user and a dropped connection
+ * were indistinguishable, so a flaky load produced a blank FlightPlan —
+ * and the next edit saved that blank over the real one. One bad network
+ * moment silently erased every task, goal, course and logbook entry.
+ *
+ * Callers must check `ok` before trusting `data`.
+ */
 async function loadCloudData(userId) {
   const { data, error } = await supabase
     .from("flightplan_data")
@@ -258,11 +270,12 @@ async function loadCloudData(userId) {
     .maybeSingle();
 
   if (error) {
-    console.error("cloud load failed", error);
-    return null;
+    return { ok: false, error: error.message || "Couldn't reach FlightPlan's data." };
   }
 
-  return data?.data || null;
+  // A missing row IS a successful load — it just means "nothing saved
+  // yet", which is the correct starting state for a new account.
+  return { ok: true, data: data?.data || null };
 }
 
 async function saveCloudData(userId, flightData) {
@@ -280,8 +293,9 @@ async function saveCloudData(userId, flightData) {
     );
 
   if (error) {
-    console.error("cloud save failed", error);
+    return { ok: false, error: error.message || "Couldn't save." };
   }
+  return { ok: true };
 }
 
 /* ---------- grade math ---------- */
@@ -1120,6 +1134,12 @@ export default function CollegeHub() {
   const [data, setData] = useState(null);
   const [user, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+  const [saveError, setSaveError] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
+  /* False until a load has actually succeeded. Every write checks it,
+     so no code path can persist a dataset the server never sent. */
+  const saveArmed = useRef(false);
   const [tab, setTab] = useState("home");
   const [openCourse, setOpenCourse] = useState(null);
   const [cirrusOpen, setCirrusOpen] = useState(false);
@@ -1199,38 +1219,65 @@ export default function CollegeHub() {
   useEffect(() => {
     if (!user) {
       setData(null);
+      /* Signing out disarms saving too. Otherwise a stray render during
+         teardown could write one user's state under another's id. */
+      saveArmed.current = false;
+      setLoadError(null);
       return;
     }
 
     let cancelled = false;
+    // Never save against data we have not successfully loaded.
+    saveArmed.current = false;
+    setLoadError(null);
 
     (async () => {
-      const cloud = await loadCloudData(user.id);
+      const result = await loadCloudData(user.id);
+      if (cancelled) return;
 
-      if (!cancelled) {
-        setData(migrate(cloud));
-        first.current = true;
+      if (!result.ok) {
+        /* Deliberately does NOT fall back to a blank FlightPlan. An
+           empty dataset here looks exactly like a new account, and the
+           first edit afterwards would overwrite the real one. The user
+           is shown the failure and offered a retry instead. */
+        setLoadError(result.error);
+        return;
       }
+
+      setData(migrate(result.data));
+      first.current = true;
+      saveArmed.current = true;   // only now is it safe to write back
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [user]);
+  }, [user, reloadKey]);
 
   useEffect(() => {
     if (!user || !data) return;
+    // The load either failed or has not finished; writing now would
+    // save something that never came from the server.
+    if (!saveArmed.current) return;
 
     if (first.current) {
       first.current = false;
       return;
     }
 
-    const t = setTimeout(() => {
-      saveCloudData(user.id, data);
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      const result = await saveCloudData(user.id, data);
+      if (cancelled) return;
+      // A failed save is shown rather than swallowed: the edit is still
+      // on screen, and the user needs to know it is not yet safe.
+      setSaveError(result.ok ? null : result.error);
     }, 500);
 
-    return () => clearTimeout(t);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
   }, [data, user]);
 
   useEffect(() => {
@@ -1316,6 +1363,35 @@ export default function CollegeHub() {
           <div style={{ marginTop: 22 }} className="hero-2">
             <button style={S.btn} className="btn cta" onClick={signIn}>
               Continue with Google
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  /* A failed load is a dead end unless we offer a way out of it — and
+     it must never silently become an empty FlightPlan. */
+  if (loadError) {
+    return (
+      <div style={{ ...S.page, ...cabin.vars }} className={`hub ${cabin.phase}`}>
+        <style>{CSS + AV_CSS}</style>
+        <div style={{ paddingTop: 90, maxWidth: 520 }} role="alert">
+          <p style={S.eyebrow}>FLIGHTPLAN</p>
+          <h1 className="hero-h" style={{ marginTop: 14, fontSize: 28 }}>
+            Couldn't load your data.
+          </h1>
+          <p style={{ ...S.dim, marginTop: 12 }}>
+            Your FlightPlan is safe — this device just couldn't reach it. Nothing
+            has been changed or overwritten.
+          </p>
+          <p style={{ ...S.dim, marginTop: 6, opacity: 0.7, fontSize: 13 }}>{loadError}</p>
+          <div style={{ marginTop: 22, display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <button style={S.btn} className="btn" onClick={() => setReloadKey((k) => k + 1)}>
+              Try again
+            </button>
+            <button style={S.btnGhost || S.btn} className="btn" onClick={signOut}>
+              Sign out
             </button>
           </div>
         </div>
@@ -2578,7 +2654,7 @@ function History({ data, update }) {
                 <td style={S.td}>{s.minutes}</td>
                 <td style={S.td}>{s.what}</td>
                 <td style={S.td}>
-                  <button style={S.btn} className="btn" onClick={() => remove(s.id)}>×</button>
+                  <button style={S.btn} className="btn" onClick={() => remove(s.id)} aria-label={`Delete study session: ${s.what || "untitled"}`} title="Delete">×</button>
                 </td>
               </tr>
             ))}
@@ -2754,7 +2830,7 @@ function GradeEditor({ data, update, courseId }) {
                         />
                       </td>
                       <td style={S.td}>
-                        <button style={S.btn} className="btn" onClick={() => removeItem(cat.id, i.id)}>×</button>
+                        <button style={S.btn} className="btn" onClick={() => removeItem(cat.id, i.id)} aria-label={`Delete grade item: ${i.name || "untitled"}`} title="Delete">×</button>
                       </td>
                     </tr>
                   ))}
@@ -2907,7 +2983,7 @@ function GoalCard({ goal, data, update }) {
               <li key={s.id} style={S.row}>
                 <input type="checkbox" checked={s.done} onChange={() => toggleStep(s.id)} />
                 <span style={{ textDecoration: s.done ? "line-through" : "none" }}>{s.text}</span>
-                <button style={S.btn} className="btn" onClick={() => removeStep(s.id)}>×</button>
+                <button style={S.btn} className="btn" onClick={() => removeStep(s.id)} aria-label={`Delete step: ${s.text || "untitled"}`} title="Delete">×</button>
               </li>
             ))}
           </ul>
@@ -2952,7 +3028,7 @@ function GoalCard({ goal, data, update }) {
                     <td style={S.td}>{l.amount}</td>
                     <td style={S.td}>{l.note}</td>
                     <td style={S.td}>
-                      <button style={S.btn} className="btn" onClick={() => removeLog(l.id)}>×</button>
+                      <button style={S.btn} className="btn" onClick={() => removeLog(l.id)} aria-label="Delete log entry" title="Delete">×</button>
                     </td>
                   </tr>
                 ))}
@@ -3456,7 +3532,7 @@ function Gym({ data, update }) {
                     <td style={S.td}>{w.miles || "—"}</td>
                     <td style={S.td}>{w.notes}</td>
                     <td style={S.td}>
-                      <button style={S.btn} className="btn" onClick={() => remove(w.id)}>×</button>
+                      <button style={S.btn} className="btn" onClick={() => remove(w.id)} aria-label="Delete workout" title="Delete">×</button>
                     </td>
                   </tr>
                 ))}
@@ -3571,7 +3647,7 @@ function Lifts({ data, update }) {
                           <td style={S.td}>{e.reps}</td>
                           <td style={S.td}>{oneRepMax(e.weight, e.reps)}</td>
                           <td style={S.td}>
-                            <button style={S.btn} className="btn" onClick={() => removeEntry(l.id, e.id)}>×</button>
+                            <button style={S.btn} className="btn" onClick={() => removeEntry(l.id, e.id)} aria-label="Delete set" title="Delete">×</button>
                           </td>
                         </tr>
                       ))}

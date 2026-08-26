@@ -19,7 +19,7 @@ import {
   localTimeZone,
 } from "./googleCalendar.js";
 import { SPEECH_STATES } from "./cirrusSpeech.js";
-import { useCirrusVoiceInput, ENGINES } from "./cirrusVoiceInput.js";
+import { useCirrusVoiceInput } from "./cirrusVoiceInput.js";
 import { useCirrusVoice, diagnoseVoice } from "./cirrusVoice.js";
 import { useCirrusSession, SESSION_STATES } from "./cirrusSession.js";
 import { CIRRUS_LIMIT_CODES } from "./cirrusService.js";
@@ -113,7 +113,7 @@ export function Waveform({ state = WAVEFORM_STATES.READY, size = 20 }) {
    record has changed or vanished since the proposal, the card says so
    rather than showing a stale promise.
    ============================================================ */
-export function ApprovalCard({ pending, data, onApprove, onCancel }) {
+export function ApprovalCard({ pending, data, onApprove, onCancel, busy = false }) {
   if (!pending) return null;
   const d = describeProposal(pending, data);
   if (!d) return null;
@@ -157,11 +157,23 @@ export function ApprovalCard({ pending, data, onApprove, onCancel }) {
         </p>
       )}
 
+      {/* Disabled while a decision is in flight. The engine already
+          refuses to run an action twice — it clears the transaction
+          before executing — but an enabled button during that round
+          trip invites a second tap that comes back with "there's
+          nothing waiting for approval", which reads like the approval
+          failed when it actually succeeded. */}
       <div className="cirrus-approval-actions">
-        <button type="button" className="cirrus-approve" onClick={onApprove}>
-          Approve
+        <button
+          type="button"
+          className="cirrus-approve"
+          onClick={onApprove}
+          disabled={busy}
+          aria-busy={busy}
+        >
+          {busy ? "Working…" : "Approve"}
         </button>
-        <button type="button" className="cirrus-cancel" onClick={onCancel}>
+        <button type="button" className="cirrus-cancel" onClick={onCancel} disabled={busy}>
           Cancel
         </button>
       </div>
@@ -241,6 +253,8 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
   if (!approvalRef.current) approvalRef.current = createApprovalManager({ history: historyRef.current });
 
   const [pending, setPending] = useState(null);
+  const [resolving, setResolving] = useState(false);
+  const resolvingRef = useRef(false);
 
   /* ---------- voice (Stage 7) ----------
      Mode behaviour is the one already documented for Cirrus, not a new
@@ -366,22 +380,32 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
 
   const resolveApproval = useCallback(
     async (input) => {
-      const result = await approvalRef.current.resolve(input, runtimeRef.current);
-      syncPending();
-      if (result.status === "ambiguous") return result; // caller decides what to say
-      const said =
-        result.status === "success"
-          ? // Same description an auto-executed action gets, so an
-            // approved change is reported as specifically as an
-            // immediate one — and always from the registry's result.
-            describeOutcome(result)
-          : result.status === "rejected"
-          ? "Left unchanged."
-          : result.status === "no_pending_action"
-          ? "There's nothing waiting for approval."
-          : result.message || "That couldn't be completed.";
-      await say(said);
-      return result;
+      /* A ref, not state: this callback is recreated rarely and a state
+         read here would be a render behind. One decision at a time. */
+      if (resolvingRef.current) return { status: "busy" };
+      resolvingRef.current = true;
+      setResolving(true);
+      try {
+        const result = await approvalRef.current.resolve(input, runtimeRef.current);
+        syncPending();
+        if (result.status === "ambiguous") return result; // caller decides what to say
+        const said =
+          result.status === "success"
+            ? // Same description an auto-executed action gets, so an
+              // approved change is reported as specifically as an
+              // immediate one — and always from the registry's result.
+              describeOutcome(result)
+            : result.status === "rejected"
+            ? "Left unchanged."
+            : result.status === "no_pending_action"
+            ? "There's nothing waiting for approval."
+            : result.message || "That couldn't be completed.";
+        await say(said);
+        return result;
+      } finally {
+        resolvingRef.current = false;
+        setResolving(false);
+      }
     },
     [say, syncPending]
   );
@@ -890,6 +914,7 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
                     <ApprovalCard
                       pending={pending}
                       data={data}
+                      busy={resolving}
                       onApprove={() => resolveApproval({ decision: "approve" })}
                       onCancel={() => {
                         approvalRef.current.cancel();
