@@ -66,13 +66,10 @@ create unique index if not exists flightplan_data_user_id_key
   on public.flightplan_data (user_id);
 
 -- ============================================================
--- VERIFY. Run these after the above and read the results.
+-- VERIFY: run flightplan-data-rls-verify.sql next.
 --
---   select relrowsecurity from pg_class
---   where oid = 'public.flightplan_data'::regclass;
---     -> must be true. false means the data is public to any session.
---
---   select policyname, cmd, qual, with_check from pg_policies
---   where tablename = 'flightplan_data';
---     -> expect four rows; both UPDATE columns must be populated.
+-- Everything above is DDL, and DDL reports "Success. No rows returned."
+-- even when it worked — so this file's output tells you nothing about
+-- whether the policy is in force. The verify file is queries, and it
+-- answers that question directly.
 -- ============================================================
