@@ -914,6 +914,17 @@ export const permissionFor = (name) =>
    table or schema is introduced. Metadata only — never parameters,
    never card or note text, never tokens or keys.
    ============================================================ */
+/** Lifecycle points a protected action can pass through. */
+export const HISTORY_EVENTS = {
+  PROPOSED: "proposed",
+  APPROVED: "approved",
+  REJECTED: "rejected",
+  EXPIRED: "expired",
+  CONFLICT: "conflict",
+  EXECUTED: "executed",
+  FAILED: "failed",
+};
+
 export function createActionHistory(max = MAX_HISTORY) {
   const entries = [];
   return {
@@ -923,6 +934,10 @@ export function createActionHistory(max = MAX_HISTORY) {
         action: entry.action || "unknown",
         permission: entry.permission || null,
         status: entry.status,
+        // Lifecycle point, when the approval layer supplies one.
+        event: entry.event || null,
+        // Correlates every entry for one pending transaction.
+        transactionId: entry.transactionId || null,
         approval: entry.status === "approval_required" ? "pending" : "not_required",
         ok: entry.status === "success",
         summary: String(entry.summary || "").slice(0, 120),

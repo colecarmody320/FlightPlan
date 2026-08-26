@@ -1370,6 +1370,7 @@ export default function CollegeHub() {
         <CirrusDock
           data={data}
           update={update}
+          helpers={CIRRUS_HELP}
           open={cirrusOpen}
           setOpen={setCirrusOpen}
           page={tab}

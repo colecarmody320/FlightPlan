@@ -1,6 +1,14 @@
-import React, { useRef, useState, useEffect } from "react";
+import React, { useCallback, useRef, useState, useEffect } from "react";
 import { CIRRUS_MODES, WAVEFORM_STATES } from "./cirrusShared.js";
 import { useCirrusConversation } from "./cirrusConversation.js";
+import {
+  createApprovalManager,
+  describeProposal,
+  detectBulkDestructive,
+  INTENT,
+  interpretApproval,
+} from "./cirrusApproval.js";
+import { createActionHistory } from "./cirrusActions.js";
 
 /* ============================================================
    CIRRUS — personal assistant layer
@@ -77,12 +85,157 @@ export function Waveform({ state = WAVEFORM_STATES.READY, size = 20 }) {
    `open`/`setOpen` are owned by the caller (CollegeHub) so the
    keyboard shortcut and the Home strip can reach the same state.
    ============================================================ */
-export function CirrusDock({ data, update, open, setOpen, page, selectedObject }) {
+
+/* ============================================================
+   APPROVAL CARD (Stage 6)
+
+   The visible half of the approval gate. It exists so approval is
+   never only conversational: a mis-heard "yes" is not the sole route
+   to a destructive change, and the user can always see exactly what
+   would happen and press Cancel instead.
+
+   Everything it renders comes from `describeProposal`, which reads
+   current application data — not from anything the model said. If the
+   record has changed or vanished since the proposal, the card says so
+   rather than showing a stale promise.
+   ============================================================ */
+export function ApprovalCard({ pending, data, onApprove, onCancel }) {
+  if (!pending) return null;
+  const d = describeProposal(pending, data);
+  if (!d) return null;
+
+  const seconds = Math.max(0, pending.secondsRemaining || 0);
+  const clock = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+  const destructive = d.verb === "Delete";
+
+  return (
+    <div className={destructive ? "cirrus-approval danger" : "cirrus-approval"} role="alertdialog"
+         aria-label="Pending change">
+      <div className="cirrus-approval-head">
+        <span className="cirrus-approval-tag">Pending change</span>
+        <span className="cirrus-approval-clock" aria-live="off" title="Approval expires">
+          {clock}
+        </span>
+      </div>
+
+      <p className="cirrus-approval-action">
+        {d.verb} &middot; {d.target}
+      </p>
+
+      {d.changes.length > 0 && (
+        <ul className="cirrus-approval-changes">
+          {d.changes.map((c) => (
+            <li key={c.field}>
+              <span className="cirrus-field">{c.field}</span>
+              <span className="cirrus-was">{formatValue(c.current)}</span>
+              <span aria-hidden="true">→</span>
+              <span className="cirrus-will">{formatValue(c.proposed)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {d.effect && <p className="cirrus-approval-effect">{d.effect}</p>}
+      {d.caution && <p className="cirrus-approval-caution">{d.caution}</p>}
+      {!d.targetStillExists && (
+        <p className="cirrus-approval-caution">
+          That record is no longer there. Approving now will do nothing.
+        </p>
+      )}
+
+      <div className="cirrus-approval-actions">
+        <button type="button" className="cirrus-approve" onClick={onApprove}>
+          Approve
+        </button>
+        <button type="button" className="cirrus-cancel" onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
+      <p className="cirrus-note dim">
+        Nothing changes until you approve. Saying no, or waiting, leaves it alone.
+      </p>
+    </div>
+  );
+}
+
+const formatValue = (v) =>
+  v === null || v === undefined || v === ""
+    ? "—"
+    : typeof v === "boolean"
+    ? v
+      ? "yes"
+      : "no"
+    : String(v).length > 60
+    ? `${String(v).slice(0, 60)}…`
+    : String(v);
+
+export function CirrusDock({ data, update, open, setOpen, page, selectedObject, helpers }) {
   const mode = data?.cirrus?.mode || CIRRUS_MODES.OFF;
   const [collapsed, setCollapsed] = useState(false);
   const [draft, setDraft] = useState("");
   const panelRef = useRef(null);
   const conversation = useCirrusConversation({ mode, page, selectedObject });
+
+  /* ---------- approval gate (Stage 6) ----------
+     Session-local and in memory. A reload drops any pending change,
+     which is the safe direction to fail: the change simply doesn't
+     happen. Nothing about it is written to flightplan_data. */
+  const historyRef = useRef(null);
+  if (!historyRef.current) historyRef.current = createActionHistory();
+  const approvalRef = useRef(null);
+  if (!approvalRef.current) approvalRef.current = createApprovalManager({ history: historyRef.current });
+
+  const [pending, setPending] = useState(null);
+
+  // `data` and `update` change identity on every save, so the runtime is
+  // read fresh at call time rather than captured when a proposal is made.
+  const runtimeRef = useRef({ data, update, helpers });
+  runtimeRef.current = { data, update, helpers };
+
+  const syncPending = useCallback(() => {
+    setPending(approvalRef.current.getPending());
+  }, []);
+
+  // The one door a structured action may enter by. Stage 5 built the
+  // registry and this stage built the gate in front of it, but the
+  // deployed cirrus-chat contract is still `{ reply: string }` — the
+  // backend has no action channel yet, so nothing calls this today.
+  // When that channel lands, this is the only line that needs to run,
+  // and every protected action arrives already gated.
+  const proposeAction = useCallback((intent) => {
+    const result = approvalRef.current.propose(intent, runtimeRef.current);
+    syncPending();
+    return result;
+  }, [syncPending]);
+  void proposeAction;
+
+  // Ticks the countdown and retires the transaction the moment the
+  // window closes, so the card can never invite an approval that would
+  // be refused.
+  useEffect(() => {
+    if (!pending) return;
+    const t = setInterval(syncPending, 1000);
+    return () => clearInterval(t);
+  }, [pending, syncPending]);
+
+  const resolveApproval = useCallback(
+    (input) => {
+      const result = approvalRef.current.resolve(input, runtimeRef.current);
+      syncPending();
+      if (result.status === "ambiguous") return result; // caller decides what to say
+      const said =
+        result.status === "success"
+          ? `Done — ${result.result?.applied || "applied"}.`
+          : result.status === "rejected"
+          ? "Left unchanged."
+          : result.status === "no_pending_action"
+          ? "There's nothing waiting for approval."
+          : result.message || "That couldn't be completed.";
+      conversation.addMessage("assistant", said);
+      return result;
+    },
+    [conversation, syncPending]
+  );
 
   useEffect(() => {
     if (!open) setCollapsed(false);
@@ -102,8 +255,36 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject }
 
   const sendDraft = (e) => {
     e.preventDefault();
-    if (!draft.trim() || conversation.sending) return;
-    conversation.send(draft);
+    const text = draft.trim();
+    if (!text || conversation.sending) return;
+
+    // Bulk destruction is refused here, before any model call. No
+    // registry action can perform one, so there is nothing to ask about.
+    if (detectBulkDestructive(text)) {
+      conversation.addMessage("user", text);
+      conversation.addMessage(
+        "assistant",
+        "I won't do that. I can only change one record at a time, and only with your approval each time. If you want something removed, name it specifically."
+      );
+      setDraft("");
+      return;
+    }
+
+    // With a change pending, the reply is an answer to that question
+    // first. Anything short of an unmistakable yes or no leaves the
+    // change pending and goes to Cirrus as an ordinary message — so
+    // "yes, but which card?" asks rather than executes.
+    if (approvalRef.current.getPending()) {
+      const intent = interpretApproval(text);
+      if (intent !== INTENT.AMBIGUOUS) {
+        conversation.addMessage("user", text);
+        resolveApproval(text);
+        setDraft("");
+        return;
+      }
+    }
+
+    conversation.send(text);
     setDraft("");
   };
 
@@ -223,6 +404,17 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject }
                       )}
                     </div>
 
+                    <ApprovalCard
+                      pending={pending}
+                      data={data}
+                      onApprove={() => resolveApproval({ decision: "approve" })}
+                      onCancel={() => {
+                        approvalRef.current.cancel();
+                        syncPending();
+                        conversation.addMessage("assistant", "Cancelled. Nothing was changed.");
+                      }}
+                    />
+
                     <div className="cirrus-suggestions" aria-label="Suggestions">
                       {["Today's mission", "What's due", "Weekly pace"].map((s) => (
                         <button key={s} type="button" className="cirrus-chip" disabled>
@@ -293,6 +485,51 @@ export function CirrusHomeStrip({ data, openPanel }) {
 }
 
 export const CIRRUS_CSS = `
+/* ---------- approval card (Stage 6) ---------- */
+.cirrus-approval{
+  border:1px solid rgba(255,255,255,.16);
+  border-radius:10px;
+  padding:10px 12px;
+  margin:8px 0 4px;
+  background:rgba(120,170,255,.07);
+}
+.cirrus-approval.danger{
+  border-color:rgba(255,140,120,.42);
+  background:rgba(255,120,100,.09);
+}
+.cirrus-approval-head{
+  display:flex; align-items:center; justify-content:space-between;
+  gap:8px; margin-bottom:6px;
+}
+.cirrus-approval-tag{
+  font-size:10px; letter-spacing:.09em; text-transform:uppercase;
+  opacity:.72; font-weight:600;
+}
+.cirrus-approval-clock{ font-size:11px; opacity:.6; font-variant-numeric:tabular-nums; }
+.cirrus-approval-action{ margin:0 0 6px; font-size:13px; line-height:1.35; }
+.cirrus-approval-changes{ list-style:none; margin:0 0 6px; padding:0; font-size:12px; }
+.cirrus-approval-changes li{
+  display:flex; align-items:baseline; gap:6px; flex-wrap:wrap; padding:2px 0;
+}
+.cirrus-field{ opacity:.6; min-width:58px; }
+.cirrus-was{ opacity:.7; text-decoration:line-through; }
+.cirrus-will{ font-weight:600; }
+.cirrus-approval-effect,
+.cirrus-approval-caution{ margin:0 0 6px; font-size:11.5px; opacity:.78; line-height:1.35; }
+.cirrus-approval-caution{ opacity:.9; }
+.cirrus-approval-actions{ display:flex; gap:8px; margin:8px 0 4px; }
+.cirrus-approve,.cirrus-cancel{
+  flex:1; padding:7px 10px; border-radius:8px; font-size:12.5px;
+  font-weight:600; cursor:pointer; border:1px solid transparent;
+}
+.cirrus-approve{ background:rgba(120,170,255,.22); border-color:rgba(120,170,255,.5); color:inherit; }
+.cirrus-approval.danger .cirrus-approve{
+  background:rgba(255,120,100,.2); border-color:rgba(255,140,120,.55);
+}
+.cirrus-cancel{ background:transparent; border-color:rgba(255,255,255,.2); color:inherit; }
+.cirrus-approve:hover{ filter:brightness(1.15); }
+.cirrus-cancel:hover{ background:rgba(255,255,255,.06); }
+
   .cirrus-toggle {
     display: inline-flex; align-items: center; justify-content: center;
     width: 34px; height: 34px;
