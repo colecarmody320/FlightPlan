@@ -1,3 +1,5 @@
+import { normalizeForSpeech } from "./cirrusSpeechNormalize.js";
+
 /* ============================================================
    CIRRUS — WRITTEN REPLY → SPOKEN LINE (Stage 8)
 
@@ -106,7 +108,11 @@ export function toSpokenText(input) {
     // A reply made entirely of notation (a lone code block, say) leaves
     // nothing to say. Returning "" lets the caller skip synthesis
     // rather than send punctuation to ElevenLabs.
-    return out;
+    if (!out) return "";
+    /* Notation is gone; now make the remaining facts SAYABLE. This runs
+       last so it sees clean prose — "**10:00**" has already become
+       "10:00" and can be read as a time rather than as markup. */
+    return normalizeForSpeech(out);
   } catch {
     // Never let preparation cost the user their spoken reply: fall back
     // to the original text, which is worse to listen to but not silent.

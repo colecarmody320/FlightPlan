@@ -19,7 +19,7 @@ import {
   localTimeZone,
 } from "./googleCalendar.js";
 import { SPEECH_STATES } from "./cirrusSpeech.js";
-import { useCirrusVoiceInput, ENGINES } from "./cirrusVoiceInput.js";
+import { useCirrusVoiceInput } from "./cirrusVoiceInput.js";
 import { useCirrusVoice, diagnoseVoice } from "./cirrusVoice.js";
 import { useCirrusSession, SESSION_STATES } from "./cirrusSession.js";
 import { CIRRUS_LIMIT_CODES } from "./cirrusService.js";
@@ -113,7 +113,7 @@ export function Waveform({ state = WAVEFORM_STATES.READY, size = 20 }) {
    record has changed or vanished since the proposal, the card says so
    rather than showing a stale promise.
    ============================================================ */
-export function ApprovalCard({ pending, data, onApprove, onCancel }) {
+export function ApprovalCard({ pending, data, onApprove, onCancel, busy = false }) {
   if (!pending) return null;
   const d = describeProposal(pending, data);
   if (!d) return null;
@@ -157,11 +157,23 @@ export function ApprovalCard({ pending, data, onApprove, onCancel }) {
         </p>
       )}
 
+      {/* Disabled while a decision is in flight. The engine already
+          refuses to run an action twice — it clears the transaction
+          before executing — but an enabled button during that round
+          trip invites a second tap that comes back with "there's
+          nothing waiting for approval", which reads like the approval
+          failed when it actually succeeded. */}
       <div className="cirrus-approval-actions">
-        <button type="button" className="cirrus-approve" onClick={onApprove}>
-          Approve
+        <button
+          type="button"
+          className="cirrus-approve"
+          onClick={onApprove}
+          disabled={busy}
+          aria-busy={busy}
+        >
+          {busy ? "Working…" : "Approve"}
         </button>
-        <button type="button" className="cirrus-cancel" onClick={onCancel}>
+        <button type="button" className="cirrus-cancel" onClick={onCancel} disabled={busy}>
           Cancel
         </button>
       </div>
@@ -241,6 +253,8 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
   if (!approvalRef.current) approvalRef.current = createApprovalManager({ history: historyRef.current });
 
   const [pending, setPending] = useState(null);
+  const [resolving, setResolving] = useState(false);
+  const resolvingRef = useRef(false);
 
   /* ---------- voice (Stage 7) ----------
      Mode behaviour is the one already documented for Cirrus, not a new
@@ -366,22 +380,32 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
 
   const resolveApproval = useCallback(
     async (input) => {
-      const result = await approvalRef.current.resolve(input, runtimeRef.current);
-      syncPending();
-      if (result.status === "ambiguous") return result; // caller decides what to say
-      const said =
-        result.status === "success"
-          ? // Same description an auto-executed action gets, so an
-            // approved change is reported as specifically as an
-            // immediate one — and always from the registry's result.
-            describeOutcome(result)
-          : result.status === "rejected"
-          ? "Left unchanged."
-          : result.status === "no_pending_action"
-          ? "There's nothing waiting for approval."
-          : result.message || "That couldn't be completed.";
-      await say(said);
-      return result;
+      /* A ref, not state: this callback is recreated rarely and a state
+         read here would be a render behind. One decision at a time. */
+      if (resolvingRef.current) return { status: "busy" };
+      resolvingRef.current = true;
+      setResolving(true);
+      try {
+        const result = await approvalRef.current.resolve(input, runtimeRef.current);
+        syncPending();
+        if (result.status === "ambiguous") return result; // caller decides what to say
+        const said =
+          result.status === "success"
+            ? // Same description an auto-executed action gets, so an
+              // approved change is reported as specifically as an
+              // immediate one — and always from the registry's result.
+              describeOutcome(result)
+            : result.status === "rejected"
+            ? "Left unchanged."
+            : result.status === "no_pending_action"
+            ? "There's nothing waiting for approval."
+            : result.message || "That couldn't be completed.";
+        await say(said);
+        return result;
+      } finally {
+        resolvingRef.current = false;
+        setResolving(false);
+      }
     },
     [say, syncPending]
   );
@@ -890,6 +914,7 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
                     <ApprovalCard
                       pending={pending}
                       data={data}
+                      busy={resolving}
                       onApprove={() => resolveApproval({ decision: "approve" })}
                       onCancel={() => {
                         approvalRef.current.cancel();
@@ -995,21 +1020,27 @@ export function CirrusHomeStrip({ data, openPanel }) {
 
 export const CIRRUS_CSS = `
 /* ---------- voice controls (Stage 7) ---------- */
+/* The transmit key. Squared and machined like every other control,
+   and unmistakably lit when the microphone is open — an open mic is
+   the one state in this app that must never be ambiguous. */
 .cirrus-mic{
-  flex:0 0 auto; width:36px; height:36px; border-radius:9px;
-  border:1px solid rgba(255,255,255,.18); background:transparent;
+  flex:0 0 auto; width:36px; height:36px; border-radius:var(--r-sm);
+  border:1px solid var(--edge); background:var(--panel-3);
+  box-shadow:var(--bezel);
   color:inherit; font-size:15px; line-height:1; cursor:pointer;
   display:inline-flex; align-items:center; justify-content:center;
+  transition:background .12s linear, border-color .12s linear;
 }
-.cirrus-mic:hover:not(:disabled){ background:rgba(255,255,255,.07); }
+.cirrus-mic:hover:not(:disabled){ background:var(--wash-strong); border-color:var(--muted); }
 .cirrus-mic:disabled{ opacity:.4; cursor:default; }
 .cirrus-mic.on{
-  background:rgba(255,120,100,.18); border-color:rgba(255,140,120,.55);
-  animation:cirrusMicPulse 1.3s ease-in-out infinite;
+  background:var(--warn-dim); border-color:var(--warn); color:var(--warn);
+  box-shadow:var(--well);
+  animation:cirrusMicPulse 1.6s ease-in-out infinite;
 }
 @keyframes cirrusMicPulse{
-  0%,100%{ box-shadow:0 0 0 0 rgba(255,140,120,.34); }
-  50%{ box-shadow:0 0 0 5px rgba(255,140,120,0); }
+  0%,100%{ border-color:var(--warn); }
+  50%{ border-color:rgba(215,84,67,.45); }
 }
 .cirrus-note.listening em{ font-style:normal; opacity:.85; }
 .cirrus-speaking-row{
@@ -1018,9 +1049,9 @@ export const CIRRUS_CSS = `
 }
 .cirrus-chip.live{
   cursor:pointer; opacity:1;
-  border-color:rgba(255,255,255,.26); background:rgba(255,255,255,.05);
+  border-color:var(--edge); background:var(--panel-3); box-shadow:var(--bezel);
 }
-.cirrus-chip.live:hover{ background:rgba(255,255,255,.1); }
+.cirrus-chip.live:hover{ background:var(--wash-strong); border-color:var(--muted); }
 @media (prefers-reduced-motion: reduce){
   .cirrus-mic.on{ animation:none; }
 }
@@ -1029,8 +1060,8 @@ export const CIRRUS_CSS = `
 .cirrus-session-row{
   display:flex; align-items:center; gap:8px;
   margin:6px 0 4px; padding:6px 8px;
-  border:1px solid rgba(255,255,255,.14); border-radius:9px;
-  background:rgba(120,170,255,.06);
+  border:1px solid var(--line); border-radius:var(--r-sm);
+  background:var(--panel-2); box-shadow:var(--well);
 }
 /* A held session drops the live tint entirely. The row should read as
    inactive at a glance, without anyone having to read the words. */
@@ -1070,7 +1101,7 @@ export const CIRRUS_CSS = `
 /* ---------- approval card (Stage 6) ---------- */
 .cirrus-approval{
   border:1px solid rgba(255,255,255,.16);
-  border-radius:10px;
+  border-radius:var(--r-md);
   padding:10px 12px;
   margin:8px 0 4px;
   background:rgba(120,170,255,.07);
@@ -1101,7 +1132,7 @@ export const CIRRUS_CSS = `
 .cirrus-approval-caution{ opacity:.9; }
 .cirrus-approval-actions{ display:flex; gap:8px; margin:8px 0 4px; }
 .cirrus-approve,.cirrus-cancel{
-  flex:1; padding:7px 10px; border-radius:8px; font-size:12.5px;
+  flex:1; padding:7px 10px; border-radius:var(--r-md); font-size:12.5px;
   font-weight:600; cursor:pointer; border:1px solid transparent;
 }
 .cirrus-approve{ background:rgba(120,170,255,.22); border-color:rgba(120,170,255,.5); color:inherit; }
@@ -1115,14 +1146,14 @@ export const CIRRUS_CSS = `
   .cirrus-toggle {
     display: inline-flex; align-items: center; justify-content: center;
     width: 34px; height: 34px;
-    border-radius: 10px;
+    border-radius: var(--r-md);
     border: 1px solid var(--edge);
     background: rgba(127,178,212,.06);
     cursor: pointer;
     transition: border-color .15s ease, background .15s ease;
   }
   .cirrus-toggle:hover { border-color: var(--lamp); background: rgba(127,178,212,.12); }
-  .cirrus-toggle.on { border-color: var(--green-bright); background: rgba(62,142,99,.14); }
+  .cirrus-toggle.on { border-color: var(--sel); background: var(--sel-dim); }
   .cirrus-toggle.off {
     border-color: transparent;
     background: none;
@@ -1146,9 +1177,12 @@ export const CIRRUS_CSS = `
     width: min(400px, 92vw);
     z-index: 46;
     display: flex; flex-direction: column;
-    background: var(--raised);
-    border-left: 1px solid var(--line);
-    box-shadow: -12px 0 32px rgba(0,0,0,.35);
+    /* An avionics stack mounted on the right of the panel: a real
+       bezel edge and a recessed face, rather than a drawer casting a
+       soft shadow over the page. */
+    background: var(--panel-1);
+    border-left: 1px solid var(--edge);
+    box-shadow: inset 1px 0 0 rgba(255,255,255,.03), -10px 0 26px rgba(0,0,0,.42);
     animation: cirrusSlideIn .22s cubic-bezier(.22,.61,.36,1) both;
   }
   .cirrus-panel.collapsed { bottom: auto; box-shadow: -12px 12px 32px rgba(0,0,0,.3); }
@@ -1159,19 +1193,32 @@ export const CIRRUS_CSS = `
 
   .cirrus-panel-head {
     display: flex; align-items: center; gap: 10px;
-    padding: 14px 12px 14px 16px;
-    border-bottom: 1px solid var(--line);
+    padding: var(--s3) var(--s3) var(--s3) var(--s4);
+    background: var(--panel-2);
+    border-bottom: 1px solid var(--edge);
+    box-shadow: var(--bezel);
     flex: none;
   }
   .cirrus-head-text { display: flex; flex-direction: column; margin-right: auto; min-width: 0; }
-  .cirrus-title { font-weight: 600; color: var(--bone); font-size: 14px; }
-  .cirrus-status { font-size: 11px; color: var(--faint); text-transform: capitalize; }
+  /* CIRRUS names itself the way a unit is labelled on a stack: the
+     serif carries the identity, the mono line underneath reports what
+     it is doing. Same pairing the rest of FlightPlan uses. */
+  .cirrus-title {
+    font-family: var(--font-display);
+    font-weight: 600; color: var(--bone); font-size: 15px;
+    letter-spacing: .01em;
+  }
+  .cirrus-status {
+    font-family: var(--font-data);
+    font-size: 9px; color: var(--faint);
+    letter-spacing: .16em; text-transform: uppercase;
+  }
 
   .cirrus-icon-btn {
     flex: none; width: 26px; height: 26px;
     display: inline-flex; align-items: center; justify-content: center;
     border: none; background: none; color: var(--muted);
-    border-radius: 7px; cursor: pointer; font-size: 12px;
+    border-radius: var(--r-md); cursor: pointer; font-size: 12px;
     transition: color .15s ease, background .15s ease;
   }
   .cirrus-icon-btn:hover { color: var(--bone); background: rgba(255,255,255,.06); }
@@ -1182,15 +1229,15 @@ export const CIRRUS_CSS = `
     padding: 14px 16px 16px;
   }
 
-  .cirrus-modes { display: flex; gap: 4px; padding: 3px; background: var(--surface); border-radius: 10px; flex: none; }
+  .cirrus-modes { display: flex; gap: 4px; padding: 3px; background: var(--surface); border-radius: var(--r-md); flex: none; }
   .cirrus-mode {
     flex: 1; border: none; background: none; color: var(--muted);
     font-family: 'Inter', system-ui, sans-serif; font-size: 12.5px; font-weight: 500;
-    padding: 6px 4px; border-radius: 8px; cursor: pointer;
+    padding: 6px 4px; border-radius: var(--r-md); cursor: pointer;
     transition: color .15s ease, background .15s ease;
   }
   .cirrus-mode:hover { color: var(--bone); }
-  .cirrus-mode.on { color: var(--green-bright); background: rgba(62,142,99,.16); }
+  .cirrus-mode.on { color: var(--sel); background: var(--sel-dim); }
 
   .cirrus-note { font-size: 12px; color: var(--faint); line-height: 1.5; margin: 0; }
   .cirrus-note.dim { opacity: .8; }
@@ -1205,14 +1252,14 @@ export const CIRRUS_CSS = `
   }
   .cirrus-log-msg.user {
     align-self: flex-end;
-    background: rgba(62,142,99,.14); color: var(--bone);
-    border-radius: 12px 12px 2px 12px;
+    background: var(--sel-dim); color: var(--bone);
+    border-radius: var(--r-md) 12px 2px 12px;
   }
   .cirrus-log-msg.assistant {
     align-self: flex-start;
     background: var(--surface); color: var(--bone);
     border: 1px solid var(--line);
-    border-radius: 12px 12px 12px 2px;
+    border-radius: var(--r-md) 12px 12px 2px;
   }
   .cirrus-error {
     border-left: 2px solid var(--alert);
@@ -1233,12 +1280,12 @@ export const CIRRUS_CSS = `
   .cirrus-chip {
     border: 1px solid var(--edge); background: var(--surface); color: var(--muted);
     font-family: 'Inter', system-ui, sans-serif; font-size: 11.5px;
-    padding: 6px 10px; border-radius: 999px; cursor: not-allowed;
+    padding: 6px 10px; border-radius: var(--r-sm); cursor: not-allowed;
   }
 
   .cirrus-chat-input { display: flex; gap: 6px; flex: none; }
   .cirrus-chat-input input {
-    flex: 1; min-width: 0; padding: 8px 10px; font-size: 13px; border-radius: 8px;
+    flex: 1; min-width: 0; padding: 8px 10px; font-size: 13px; border-radius: var(--r-md);
   }
   .cirrus-chat-input .btn { padding: 8px 14px; font-size: 13px; }
 
@@ -1249,15 +1296,15 @@ export const CIRRUS_CSS = `
     padding: 10px 14px;
     margin-bottom: 22px;
     border: 1px solid var(--line);
-    border-radius: 12px;
-    background: rgba(62,142,99,.05);
+    border-radius: var(--r-md);
+    background: var(--panel-2);
     color: var(--muted);
     font-family: 'Inter', system-ui, sans-serif;
     font-size: 13px;
     cursor: pointer;
     transition: border-color .15s ease, background .15s ease;
   }
-  .cirrus-strip:hover { border-color: var(--edge); background: rgba(62,142,99,.09); }
+  .cirrus-strip:hover { border-color: var(--edge); background: var(--wash); }
   .cirrus-strip.off { color: var(--faint); background: transparent; }
   .cirrus-strip-hint {
     margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 10px;
@@ -1295,7 +1342,7 @@ export const CIRRUS_CSS = `
       left: 0; right: 0; top: auto; bottom: 0;
       width: 100%; height: 86vh;
       border-left: none; border-top: 1px solid var(--line);
-      border-radius: 16px 16px 0 0;
+      border-radius: var(--r-md) 16px 0 0;
       animation: cirrusSlideUp .22s cubic-bezier(.22,.61,.36,1) both;
     }
     .cirrus-panel.collapsed { height: auto; }

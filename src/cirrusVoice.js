@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { supabase } from "./supabase.js";
 import { toSpokenText } from "./cirrusSpeechText.js";
+import { createSpeechQueue } from "./cirrusSpeechQueue.js";
 
 /* ============================================================
    CIRRUS — SPEECH OUTPUT (Stage 7)
@@ -189,9 +190,15 @@ export function useCirrusVoice({ enabled = true } = {}) {
     }
   }, []);
 
-  /** Stops playback and frees the audio immediately. */
-  const stop = useCallback(() => {
-    turnRef.current += 1;
+  /**
+   * Silences the audio element. The lowest level primitive here: it
+   * knows nothing about queues or turns.
+   *
+   * Kept separate from stop() on purpose. The queue calls this when it
+   * cancels, and stop() calls the queue — routing both through one
+   * function would be a cycle that recurses until the stack gives out.
+   */
+  const haltAudio = useCallback(() => {
     const a = audioRef.current;
     if (a) {
       try {
@@ -203,8 +210,19 @@ export function useCirrusVoice({ enabled = true } = {}) {
       }
     }
     releaseUrl();
-    setSpeaking(false);
   }, [releaseUrl]);
+
+  /** Stops playback, and abandons anything the queue still intended to
+      say. Used by the user's Stop/Interrupt and by every teardown. */
+  const stop = useCallback(() => {
+    turnRef.current += 1;
+    /* The queue first: silencing the element alone would leave the next
+       chunk free to start a moment later, which is exactly how a
+       "stopped" reply carries on talking over the next one. */
+    queueRef.current?.cancel?.("stop");
+    haltAudio();
+    setSpeaking(false);
+  }, [haltAudio]);
 
   /**
    * Call synchronously inside a user gesture (the mic tap). Playing a
@@ -226,104 +244,136 @@ export function useCirrusVoice({ enabled = true } = {}) {
   }, [getAudio]);
 
   /**
+   * Plays ONE clip and resolves when it has finished.
+   *
+   * The only thing in Cirrus that starts audio. Everything about
+   * ordering lives in the queue above it; this function's whole job is
+   * "play exactly this, tell me when it stops".
+   *
+   * The object URL is revoked only after the element has let go of it.
+   * Revoking a URL a media element is still reading is one of the ways
+   * audio turns to noise partway through.
+   */
+  const playBlob = useCallback(
+    (blob, signal) => {
+      const a = getAudio();
+      if (!a) return Promise.resolve({ ok: false, code: "unknown" });
+      if (signal?.cancelled) return Promise.resolve({ ok: false, code: "superseded" });
+
+      const url = URL.createObjectURL(blob);
+      urlRef.current = url;
+
+      return new Promise((resolve) => {
+        let settled = false;
+        let poll = null;
+
+        const finish = (outcome) => {
+          if (settled) return;
+          settled = true;
+          if (poll) clearInterval(poll);
+          a.onended = null;
+          a.onerror = null;
+          // Detach the source before revoking, so the element is not
+          // mid-read when the URL disappears.
+          try {
+            a.pause();
+            a.removeAttribute("src");
+            a.load();
+          } catch {
+            /* already torn down */
+          }
+          if (urlRef.current === url) releaseUrl();
+          else URL.revokeObjectURL(url);
+          resolve(outcome);
+        };
+
+        a.onended = () => finish({ ok: true });
+        a.onerror = () => finish({ ok: false, code: "playback_error" });
+        // A cancel cannot fire "ended"; without this the queue would
+        // wait for an event that is never coming.
+        poll = setInterval(() => {
+          if (signal?.cancelled) finish({ ok: false, code: "superseded" });
+        }, 100);
+
+        a.src = url;
+        let started;
+        try {
+          started = a.play();
+        } catch (err) {
+          finish({ ok: false, code: "playback_blocked", detail: err?.message });
+          return;
+        }
+        if (started && typeof started.catch === "function") {
+          started.catch(() => finish({ ok: false, code: "playback_blocked" }));
+        }
+      });
+    },
+    [getAudio, releaseUrl],
+  );
+
+  /* The queue is built once and lives for the hook's life. Rebuilding
+     it would orphan whatever is playing, which is precisely the class
+     of bug it exists to prevent. */
+  const queueRef = useRef(null);
+  if (!queueRef.current) {
+    queueRef.current = createSpeechQueue({
+      synthesize: (chunk) => fetchSpeech(chunk),
+      playBlob: (blob, signal) => playRef.current(blob, signal),
+      onSpeakingChange: (v) => setSpeaking(v),
+      // haltAudio, NOT stop(): stop() cancels the queue, and the queue
+      // calls this from inside its own cancel().
+      stopPlayback: () => haltRef.current(),
+      // Vite strips this branch from a production build entirely.
+      debug: Boolean(import.meta?.env?.DEV),
+    });
+  }
+  const playRef = useRef(playBlob);
+  playRef.current = playBlob;
+  const haltRef = useRef(haltAudio);
+  haltRef.current = haltAudio;
+
+  /**
    * Speaks `text`, resolving when playback has actually FINISHED —
    * not when it starts.
    *
-   * A continuous conversation turns on this distinction: the
-   * microphone must stay shut until Cirrus has stopped talking, or it
-   * transcribes Cirrus. Every exit resolves exactly once — ended,
-   * error, superseded by a newer utterance, or stopped by the user —
-   * so a caller awaiting it can never hang.
-   *
-   * Callers that only want fire-and-forget speech can still ignore the
-   * promise; the reply is on screen either way.
+   * A continuous conversation turns on this distinction: the microphone
+   * must stay shut until Cirrus has stopped talking, or it transcribes
+   * Cirrus. Every exit resolves exactly once — finished, failed,
+   * superseded by a newer utterance, or stopped by the user — so a
+   * caller awaiting it can never hang.
    */
   const speak = useCallback(
     async (text) => {
       if (!enabled) return { ok: false, code: "disabled" };
-      const a = getAudio();
-      if (!a) return { ok: false, code: "unknown" };
 
       /* Speech and the transcript diverge here, and only here. The line
          is already on screen with its formatting intact; what goes to
-         ElevenLabs is the same sentence with the notation removed. */
+         ElevenLabs is the same sentence with the notation removed and
+         its times, units and acronyms made sayable. */
       const spoken = toSpokenText(text);
-
-      /* A new utterance always supersedes the old one — including a
-         silent one. Stopping before the nothing-to-speak check matters:
-         otherwise a reply that happened to be pure notation would leave
-         the PREVIOUS answer still playing underneath a new one. */
-      stop();
-      const turn = turnRef.current;
-
-      // Nothing left to say once the notation is gone. Silence is the
-      // right output, and it costs no synthesis.
-      if (!spoken) return { ok: false, code: "nothing_to_speak" };
-
-      const result = await fetchSpeech(spoken);
-      if (!result.ok) {
-        if (turn === turnRef.current) {
-          setError({
-            code: result.code,
-            message: TTS_ERRORS[result.code] || TTS_ERRORS.unknown,
-            // The provider's own words. Dropping these is what turns a
-            // five-minute fix into a debugging session — there is no
-            // console to check on an iPad.
-            detail: result.detail || null,
-          });
-        }
-        return result;
+      if (!spoken) {
+        // Nothing left to say once the notation is gone. Still cancel:
+        // a silent reply must not leave the previous one playing.
+        queueRef.current.cancel("nothing-to-speak");
+        return { ok: false, code: "nothing_to_speak" };
       }
-      // The turn was cancelled while we were synthesising.
-      if (turn !== turnRef.current) return { ok: false, code: "superseded" };
 
-      const url = URL.createObjectURL(result.blob);
-      urlRef.current = url;
-      a.src = url;
-
-      // One settle, whichever way playback ends.
-      let settle;
-      const finished = new Promise((resolve) => { settle = resolve; });
-      let settled = false;
-      const done = (outcome) => {
-        if (settled) return;
-        settled = true;
-        if (turn === turnRef.current) {
-          setSpeaking(false);
-          releaseUrl();
-        }
-        settle(outcome);
-      };
-      a.onended = () => done({ ok: true });
-      a.onerror = () => done({ ok: false, code: "playback_error" });
-      // A stop() or a newer utterance bumps the turn; poll for that so
-      // an interrupted turn resolves rather than waiting for an
-      // "ended" event that will never come.
-      const watch = setInterval(() => {
-        if (turn !== turnRef.current) {
-          clearInterval(watch);
-          done({ ok: false, code: "superseded" });
-        }
-      }, 120);
-
-      try {
-        setSpeaking(true);
+      const outcome = await queueRef.current.speak(spoken);
+      if (!outcome.ok && outcome.code && outcome.code !== "superseded") {
+        setError({
+          code: outcome.code,
+          message: TTS_ERRORS[outcome.code] || TTS_ERRORS.unknown,
+          // The provider's own words. Dropping these is what turns a
+          // five-minute fix into a debugging session — there is no
+          // console to check on an iPad.
+          detail: outcome.detail || null,
+        });
+      } else if (outcome.ok) {
         setError(null);
-        await a.play();
-      } catch {
-        // Autoplay refused — usually because the turn didn't start from
-        // a tap. Text is already visible, so this is a quiet failure.
-        clearInterval(watch);
-        setError({ code: "playback_blocked", message: TTS_ERRORS.playback_blocked, detail: null });
-        done({ ok: false, code: "playback_blocked" });
-        return { ok: false, code: "playback_blocked" };
       }
-
-      const outcome = await finished;
-      clearInterval(watch);
       return outcome;
     },
-    [enabled, getAudio, stop, releaseUrl]
+    [enabled],
   );
 
   // Never leave audio playing or an object URL alive behind us.

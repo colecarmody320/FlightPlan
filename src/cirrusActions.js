@@ -771,10 +771,30 @@ function chooseCalendar(p, g) {
   };
 }
 
+/**
+ * Today, in the user's own timezone.
+ *
+ * The fallback matters: `toISOString().slice(0, 10)` is UTC, so for a
+ * user west of Greenwich it returns TOMORROW for the last few hours of
+ * every evening. An action that resolved "today" that way would create,
+ * move or delete an event on the wrong day — and only after dark, which
+ * is exactly the kind of bug that survives testing.
+ *
+ * The app supplies helpers.todayISO in practice; this keeps the
+ * fallback correct rather than merely present.
+ */
+function todayLocalISO(rt) {
+  if (rt?.helpers?.todayISO) return rt.helpers.todayISO();
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+    d.getDate(),
+  ).padStart(2, "0")}`;
+}
+
 /** Shared identification for the two protected Google actions. */
 function identify(p, rt) {
   const g = rt.google;
-  const today = rt.helpers?.todayISO ? rt.helpers.todayISO() : new Date().toISOString().slice(0, 10);
+  const today = todayLocalISO(rt);
 
   let date = null;
   if (p.date !== undefined) {
@@ -820,7 +840,7 @@ define("create_google_calendar_event", {
     if (blocked) return blocked;
     const g = rt.google;
 
-    const today = rt.helpers?.todayISO ? rt.helpers.todayISO() : new Date().toISOString().slice(0, 10);
+    const today = todayLocalISO(rt);
     const when = resolveDate(p.date, today);
     if (!when.ok) return failure("ambiguous", when.reason, "create_google_calendar_event");
 
@@ -905,7 +925,7 @@ define("update_google_calendar_event", {
     if (found.error) return { error: found.error };
     const ev = found.event;
 
-    const today = rt.helpers?.todayISO ? rt.helpers.todayISO() : new Date().toISOString().slice(0, 10);
+    const today = todayLocalISO(rt);
     const changes = {};
     if (p.title !== undefined) changes.title = p.title;
     if (p.location !== undefined) changes.location = p.location;

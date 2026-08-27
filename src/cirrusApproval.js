@@ -4,7 +4,6 @@ import {
   fingerprintTarget,
   describeTarget,
   permissionFor,
-  PERMISSIONS,
   HISTORY_EVENTS,
 } from "./cirrusActions.js";
 

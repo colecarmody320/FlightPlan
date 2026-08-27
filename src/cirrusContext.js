@@ -732,6 +732,46 @@ const BUILDERS = {
  * be written back. Callers must treat the result as disposable: by the
  * time a reply arrives, production data may already have moved on.
  */
+/**
+ * The one unambiguous statement of "now", in the user's own timezone.
+ *
+ * Always included, whatever domains were selected. Before this, the
+ * only time signal was `generatedAt` — a UTC instant — plus a local
+ * date that reached the model only when the mission or calendar domain
+ * happened to be chosen. Ask "what's next today?" on a page that
+ * selected neither and Cirrus was reasoning from a UTC timestamp that,
+ * after about 8pm in Michigan, names TOMORROW.
+ *
+ * It costs a handful of tokens and removes an entire class of
+ * confidently-wrong answers about days and deadlines.
+ */
+export function nowContext(helpers) {
+  const d = new Date();
+  const pad2 = (n) => String(n).padStart(2, "0");
+  const date = helpers?.todayISO
+    ? helpers.todayISO()
+    : `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  let timeZone = null;
+  try {
+    timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+  } catch {
+    /* older engines: the offset below still pins it */
+  }
+  // Minutes WEST of UTC is what getTimezoneOffset returns; invert it so
+  // the sign reads the way a person writes an offset.
+  const offsetMin = -d.getTimezoneOffset();
+  const sign = offsetMin >= 0 ? "+" : "-";
+  const abs = Math.abs(offsetMin);
+  return {
+    date,
+    time: `${pad2(d.getHours())}:${pad2(d.getMinutes())}`,
+    weekday: d.toLocaleDateString(undefined, { weekday: "long" }),
+    timeZone,
+    utcOffset: `${sign}${pad2(Math.floor(abs / 60))}:${pad2(abs % 60)}`,
+    note: "All dates and times in this context are the user's local time.",
+  };
+}
+
 export function buildCirrusContext({
   data,
   helpers,
@@ -777,6 +817,8 @@ export function buildCirrusContext({
   }
 
   return {
+    // Local, explicit, and never omitted — see nowContext above.
+    now: nowContext(helpers),
     generatedAt: new Date().toISOString(),
     page: page || null,
     selectedObject: selectedObject || null,
