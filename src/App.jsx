@@ -4326,33 +4326,80 @@ const CSS = `
     --line:    #2B3136;   /* hairline separator */
     --edge:    #3A4249;   /* bezel edge, deliberate and visible */
 
-    /* --- type --- */
-    --bone:  #E7EAEC;     /* primary */
-    --muted: #98A1A9;     /* secondary */
-    /* Lifted from #6A737B, which measured 3.93:1 on the panel — below
-       readable at the 9px these labels are set in. Engraved text on a
-       panel is small, never faint. */
-    --faint: #7D868E;     /* micro-labels, units, captions */
+    /* Semantic names for the same surfaces, and the older names kept
+       pointing at them. These are structural, not colour, so aliasing
+       is safe here — unlike the green aliases, which silently kept
+       every legacy call site green and have been removed. */
+    --surface:        var(--panel-1);
+    --surface-raised: var(--panel-2);
+    --surface-control: var(--panel-3);
+    --raised:         var(--panel-2);
+    --border:         var(--line);
+    --border-strong:  var(--edge);
 
-    /* --- status. Aviation semantics, used sparingly. --- */
-    --ok:       #4FAE72;  /* normal, complete, connected, on track */
-    --ok-dim:   rgba(79,174,114,.13);
-    --caution:  #DFA23A;  /* attention, due soon, degraded */
+
+    /* ============================================================
+       SEMANTIC COLOUR — the G1000 rule
+
+       Colour is information. It is never brand, never decoration, and
+       never inherited "because that is what this used to be".
+
+       The default state of this interface is GREY. A screen with
+       nothing urgent on it should be almost monochrome, because that
+       is what makes a single amber row impossible to miss. Every time
+       a colour is spent on something ordinary, every real warning gets
+       quieter.
+
+       There is deliberately no accent colour. FlightPlan's identity
+       comes from its typography and its panel construction, not from
+       a hue applied to headings.
+       ============================================================ */
+
+    /* Normal information. The overwhelming majority of the interface. */
+    --text-primary:   #E7EAEC;
+    --text-secondary: #98A1A9;
+    --text-tertiary:  #7D868E;   /* engraved micro-labels, units */
+    --inactive:       #5C656D;   /* present but not in play */
+
+    /* Selected, interactive, upcoming, informational. */
+    --informational: #55A6CE;
+    --informational-dim: rgba(85,166,206,.13);
+    --selected: var(--informational);
+
+    /* Confirmed good. Complete, connected, on track, VFR. */
+    --success: #4FAE72;
+    --success-dim: rgba(79,174,114,.13);
+
+    /* Attention: approaching, tight, falling behind. */
+    --caution: #DFA23A;
     --caution-dim: rgba(223,162,58,.13);
-    --warn:     #D75443;  /* overdue, failed, destructive */
-    --warn-dim: rgba(215,84,67,.13);
-    --sel:      #55A6CE;  /* selected, interactive, informational */
-    --sel-dim:  rgba(85,166,206,.13);
+    /* Nearer still. Same hue, more insistent. */
+    --caution-high: #F0B23A;
+    --caution-high-dim: rgba(240,178,58,.18);
 
-    /* Legacy aliases. The old names are referenced in a lot of places;
-       pointing them at the new palette converts those call sites
-       without a risky sweep through working markup. */
-    --surface: var(--panel-1);
-    --raised: var(--panel-2);
-    --green: var(--ok);
-    --green-bright: var(--ok);
-    --green-deep: var(--ok-dim);
-    --alert: var(--warn);
+    /* Act now: overdue, failed, conflicting, destructive. */
+    --critical: #D75443;
+    --critical-dim: rgba(215,84,67,.13);
+
+    /* Reserved for LIFR, which is the one thing conventionally
+       magenta on a flight-category readout. */
+    --lifr: #C061C0;
+
+    --alert: var(--critical);
+
+    /* Short aliases for the neutral ramp. These are already neutral,
+       so pointing the old names at the new ones is safe — unlike the
+       green aliases, which quietly kept every legacy call site green
+       and are gone. */
+    --bone:  var(--text-primary);
+    --muted: var(--text-secondary);
+    --faint: var(--text-tertiary);
+    --ok:   var(--success);
+    --sel:  var(--informational);
+    --sel-dim: var(--informational-dim);
+    --ok-dim: var(--success-dim);
+    --warn: var(--critical);
+    --warn-dim: var(--critical-dim);
 
     /* --- spacing scale. Use these, not arbitrary numbers. --- */
     --s1: 4px;  --s2: 8px;  --s3: 12px; --s4: 16px;
@@ -4422,7 +4469,7 @@ const CSS = `
   }
   .hub input::placeholder, .hub textarea::placeholder { color: var(--faint); }
   .hub input[type="date"] { color-scheme: dark; }
-  .hub input[type="checkbox"] { accent-color: var(--green); }
+  .hub input[type="checkbox"] { accent-color: var(--informational); }
 
   /* header */
   .hub .bar {
@@ -4602,7 +4649,7 @@ const CSS = `
     transform-origin: 100px 100px;
     animation: propSpin 2.8s cubic-bezier(.12,.72,.24,1) both;
   }
-  .hub .prop-hub { fill: var(--green); opacity: .5; }
+  .hub .prop-hub { fill: var(--text-tertiary); opacity: .35; }
   .hub .prop-bolt { fill: var(--bone); opacity: .3; }
   .hub .prop-disc {
     fill: none;
@@ -4673,8 +4720,8 @@ const CSS = `
     text-anchor: middle;
     opacity: .45;
   }
-  .hub .rwy.lit .rwy-num { fill: var(--green-bright); opacity: 1; }
-  .hub .rwy.lit .rwy-keys rect { fill: var(--green-bright); opacity: .75; }
+  .hub .rwy.lit .rwy-num { fill: var(--informational); opacity: 1; }
+  .hub .rwy.lit .rwy-keys rect { fill: var(--informational); opacity: .75; }
   .hub .rwy.lit .rwy-center { opacity: .5; }
   .hub .rwy-label {
     font-size: 11px; font-weight: 600;
@@ -4693,10 +4740,11 @@ const CSS = `
   .hub .dial-bezel { fill: none; stroke: var(--line); stroke-width: 2; }
   .hub .dial-track { fill: none; stroke: var(--line); stroke-width: 4; stroke-linecap: round; }
   .hub .dial-arc {
-    fill: none; stroke: var(--green); stroke-width: 4; stroke-linecap: round;
+    fill: none; stroke: var(--text-tertiary); stroke-width: 4; stroke-linecap: round;
     transition: stroke .3s ease;
   }
-  .hub .dial.met .dial-arc { stroke: var(--green-bright); }
+  /* "met" = the target was reached. Green earns its place here. */
+  .hub .dial.met .dial-arc { stroke: var(--success); }
   .hub .dial-tick { stroke: var(--faint); stroke-width: 1; }
   .hub .dial-tick.major { stroke: var(--muted); stroke-width: 2; }
   .hub .dial-needle {
@@ -4704,7 +4752,7 @@ const CSS = `
     transition: transform 1.25s cubic-bezier(.32,1.5,.56,1);
   }
   .hub .dial-needle polygon { fill: var(--bone); }
-  .hub .dial.met .dial-needle polygon { fill: var(--green-bright); }
+  .hub .dial.met .dial-needle polygon { fill: var(--success); }
   .hub .dial-hub { fill: var(--edge); stroke: var(--muted); stroke-width: 1; }
 
   .hub .dial-pair {
@@ -4764,9 +4812,9 @@ const CSS = `
   .hub .sock-ring { fill: var(--muted); }
   .hub .sock { transform-origin: 16px 18px; transition: transform 1.4s cubic-bezier(.22,.61,.36,1); }
   .hub .sock polygon { animation-name: flap; animation-timing-function: ease-in-out; animation-iteration-count: infinite; animation-duration: inherit; }
-  .hub .sock .s1 { fill: var(--green-bright); }
+  .hub .sock .s1 { fill: var(--text-secondary); }
   .hub .sock .s2 { fill: var(--bone); opacity: .82; animation-delay: .09s; }
-  .hub .sock .s3 { fill: var(--green); animation-delay: .18s; }
+  .hub .sock .s3 { fill: var(--text-tertiary); animation-delay: .18s; }
   @keyframes flap {
     0%, 100% { transform: translateY(0) skewY(0deg); }
     50%      { transform: translateY(-1.4px) skewY(-2.2deg); }
@@ -4978,7 +5026,7 @@ const CSS = `
   .hub option { color: var(--bone); background: var(--raised); }
   .hub a { color: var(--sel); }
   .hub code { font-family: var(--font-data); color: var(--muted); font-size: 12px; }
-  .hub ol li::marker, .hub ul li::marker { color: var(--green); }
+  .hub ol li::marker, .hub ul li::marker { color: var(--text-tertiary); }
 
   /* ============ review: a physical card on a table ============ */
   .hub .rv { max-width: 620px; margin: 0 auto; overflow-x: hidden; }
@@ -4990,7 +5038,7 @@ const CSS = `
   .hub .rv-deck {
     font-family: 'JetBrains Mono', monospace;
     font-size: 10px; letter-spacing: .18em; text-transform: uppercase;
-    color: var(--green-bright);
+    color: var(--text-tertiary);
   }
   .hub .rv-count {
     font-family: 'JetBrains Mono', monospace;
@@ -5037,7 +5085,7 @@ const CSS = `
     touch-action: pan-y;
     -webkit-tap-highlight-color: transparent;
   }
-  .hub .rv-card:focus-visible { outline: 2px solid var(--green-bright); outline-offset: 6px; border-radius: var(--r-md); }
+  .hub .rv-card:focus-visible { outline: 2px solid var(--informational); outline-offset: 6px; border-radius: var(--r-md); }
 
   .hub .rv-inner {
     position: relative; width: 100%; height: 100%;
@@ -5098,8 +5146,8 @@ const CSS = `
     position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
     font-family: 'JetBrains Mono', monospace;
     font-size: 10px; letter-spacing: .16em; text-transform: uppercase;
-    color: var(--green-bright);
-    border: 1px solid var(--green); border-radius: var(--r-sm);
+    color: var(--text-secondary);
+    border: 1px solid var(--border); border-radius: var(--r-sm);
     padding: 4px 12px; background: var(--ground);
     pointer-events: none;
   }
@@ -5137,8 +5185,8 @@ const CSS = `
   }
   .hub .rv-btn.again:hover { border-color: var(--warn); color: var(--warn); }
   .hub .rv-btn.hard:hover  { border-color: var(--caution); color: var(--caution); }
-  .hub .rv-btn.good:hover  { border-color: var(--green); color: var(--green-bright); }
-  .hub .rv-btn.easy:hover  { border-color: var(--green-bright); color: var(--green-bright); }
+  .hub .rv-btn.good:hover  { border-color: var(--success); color: var(--success); }
+  .hub .rv-btn.easy:hover  { border-color: var(--success); color: var(--success); }
   .hub .rv-btn.reveal {
     border: 1px solid var(--sel);
     background: var(--sel);
@@ -5287,7 +5335,7 @@ const S = {
     fontSize: 11,
     letterSpacing: ".2em",
     textTransform: "uppercase",
-    color: "var(--ok)",
+    color: "var(--text-tertiary)",
     margin: 0,
   },
   heroSub: { fontSize: "clamp(16px, 2.2vw, 20px)", color: "var(--bone)", fontWeight: 500, margin: "18px 0 0" },

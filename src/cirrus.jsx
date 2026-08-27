@@ -1080,12 +1080,12 @@ export const CIRRUS_CSS = `
   width:7px; height:7px; border-radius:50%; flex:0 0 auto;
   background:var(--muted);
 }
-.cirrus-session-dot.listening{ background:var(--lamp); animation:cirrusSessionPulse 1.4s ease-in-out infinite; }
-.cirrus-session-dot.thinking{ background:var(--green-bright); animation:cirrusSessionPulse .7s ease-in-out infinite; }
+.cirrus-session-dot.listening{ background:var(--informational); animation:cirrusSessionPulse 1.4s ease-in-out infinite; }
+.cirrus-session-dot.thinking{ background:var(--informational); animation:cirrusSessionPulse .7s ease-in-out infinite; }
 .cirrus-session-dot.speaking{ background:var(--bone); animation:cirrusSessionPulse .5s ease-in-out infinite; }
 /* Transcribing: work is happening, but the microphone is already shut —
    a slower pulse than listening, so the two never read the same. */
-.cirrus-session-dot.transcribing{ background:var(--lamp); animation:cirrusSessionPulse 1s ease-in-out infinite; opacity:.7; }
+.cirrus-session-dot.transcribing{ background:var(--informational); animation:cirrusSessionPulse 1s ease-in-out infinite; opacity:.7; }
 /* Hollow and still: the visual opposite of every listening state. */
 .cirrus-session-dot.paused{
   background:transparent; box-shadow:inset 0 0 0 1.5px var(--muted); animation:none;
@@ -1099,16 +1099,19 @@ export const CIRRUS_CSS = `
 }
 
 /* ---------- approval card (Stage 6) ---------- */
+/* An ordinary approval is waiting on you: caution, not alarm.
+   A DELETE is the one that gets red, because that is the one where
+   being wrong cannot be undone. */
 .cirrus-approval{
-  border:1px solid rgba(255,255,255,.16);
+  border:1px solid var(--caution);
   border-radius:var(--r-md);
   padding:10px 12px;
   margin:8px 0 4px;
-  background:rgba(120,170,255,.07);
+  background:var(--caution-dim);
 }
 .cirrus-approval.danger{
-  border-color:rgba(255,140,120,.42);
-  background:rgba(255,120,100,.09);
+  border-color:var(--critical);
+  background:var(--critical-dim);
 }
 .cirrus-approval-head{
   display:flex; align-items:center; justify-content:space-between;
@@ -1135,11 +1138,13 @@ export const CIRRUS_CSS = `
   flex:1; padding:7px 10px; border-radius:var(--r-md); font-size:12.5px;
   font-weight:600; cursor:pointer; border:1px solid transparent;
 }
-.cirrus-approve{ background:rgba(120,170,255,.22); border-color:rgba(120,170,255,.5); color:inherit; }
-.cirrus-approval.danger .cirrus-approve{
-  background:rgba(255,120,100,.2); border-color:rgba(255,140,120,.55);
+.cirrus-approve{
+  background:var(--caution-dim); border-color:var(--caution); color:var(--text-primary);
 }
-.cirrus-cancel{ background:transparent; border-color:rgba(255,255,255,.2); color:inherit; }
+.cirrus-approval.danger .cirrus-approve{
+  background:var(--critical-dim); border-color:var(--critical);
+}
+.cirrus-cancel{ background:transparent; border-color:var(--border-strong); color:var(--text-secondary); }
 .cirrus-approve:hover{ filter:brightness(1.15); }
 .cirrus-cancel:hover{ background:rgba(255,255,255,.06); }
 
@@ -1320,15 +1325,15 @@ export const CIRRUS_CSS = `
     50% { opacity: .9; transform: scaleY(1.35); }
   }
 
-  .cirrus-wave-listening .cirrus-bar { fill: var(--lamp); animation: cirrusPulse .85s ease-in-out infinite; }
-  .cirrus-wave-thinking .cirrus-bar { fill: var(--green-bright); animation: cirrusPulse .55s ease-in-out infinite; }
+  .cirrus-wave-listening .cirrus-bar { fill: var(--informational); animation: cirrusPulse .85s ease-in-out infinite; }
+  .cirrus-wave-thinking .cirrus-bar { fill: var(--informational); animation: cirrusPulse .55s ease-in-out infinite; }
   .cirrus-wave-speaking .cirrus-bar { fill: var(--bone); animation: cirrusPulse .4s ease-in-out infinite; }
   @keyframes cirrusPulse {
     0%, 100% { transform: scaleY(.6); }
     50% { transform: scaleY(2.1); }
   }
 
-  .cirrus-wave-approval .cirrus-bar { fill: var(--alert); animation: cirrusBreathe 1.1s ease-in-out infinite; }
+  .cirrus-wave-approval .cirrus-bar { fill: var(--caution); animation: cirrusBreathe 1.1s ease-in-out infinite; }
   .cirrus-wave-paused .cirrus-bar { fill: var(--faint); animation: none; opacity: .4; transform: scaleY(.6); }
 
   @media (prefers-reduced-motion: reduce) {

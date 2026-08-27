@@ -1,4 +1,5 @@
 import React, { useMemo, useState, useEffect } from "react";
+import { eventUrgency, urgencyClass, urgencyLabel, URGENCY } from "./urgency.js";
 import {
   buildCalendarEvents,
   eventsForDay,
@@ -419,15 +420,35 @@ export function ThisWeekPanel({ data, user = null, externalEvents = [], go }) {
       {deadlines.length > 0 && (
         <div className="tw-upcoming">
           <p className="tw-upcoming-h">Upcoming</p>
-          {deadlines.map((e) => (
-            <button key={e.id} type="button" className="tw-up-row" onClick={() => setSelected(e)}>
-              <span className="cal-dot" style={{ background: e.color || "var(--edge)" }} />
-              <span className="tw-up-title">{e.title}</span>
-              <span className="tw-up-when">
-                {e.date === today ? "Today" : e.date === addDaysISO(today, 1) ? "Tomorrow" : formatDayLabel(e.date)}
-              </span>
-            </button>
-          ))}
+          {deadlines.map((e) => {
+            /* The shared urgency scale decides this, not the row.
+               Anything more than a couple of days out stays grey, so
+               the list is monochrome until something actually needs
+               looking at. */
+            const u = eventUrgency({
+              dateISO: e.date,
+              startMin: typeof e.startMin === "number" ? e.startMin : null,
+              endMin: typeof e.endMin === "number" ? e.endMin : null,
+              todayISO: today,
+              nowMin,
+            });
+            const tag = urgencyLabel(u);
+            return (
+              <button
+                key={e.id}
+                type="button"
+                className={`tw-up-row ${urgencyClass(u)}`}
+                onClick={() => setSelected(e)}
+              >
+                <span className="cal-dot" style={{ background: e.color || "var(--edge)" }} />
+                <span className="tw-up-title">{e.title}</span>
+                {tag && u !== URGENCY.DONE && <span className="tw-up-tag">{tag}</span>}
+                <span className="tw-up-when">
+                  {e.date === today ? "Today" : e.date === addDaysISO(today, 1) ? "Tomorrow" : formatDayLabel(e.date)}
+                </span>
+              </button>
+            );
+          })}
         </div>
       )}
 
@@ -471,8 +492,8 @@ export const CALENDAR_CSS = `
   .cal-day-head { display: flex; flex-direction: column; gap: 1px; }
   .cal-day-name { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--faint); }
   .cal-day-num { font-size: 15px; font-weight: 600; color: var(--bone); }
-  .cal-day-head.is-today .cal-day-num { color: var(--green-bright); }
-  .cal-day-head.is-today .cal-day-name { color: var(--green-bright); }
+  .cal-day-head.is-today .cal-day-num { color: var(--informational); }
+  .cal-day-head.is-today .cal-day-name { color: var(--informational); }
 
   .cal-gutter-allday {
     font-size: 9px; letter-spacing: .1em; text-transform: uppercase; color: var(--faint);
@@ -540,7 +561,7 @@ export const CALENDAR_CSS = `
   .cal-detail-rows > div { display: flex; gap: 10px; font-size: 12.5px; }
   .cal-detail-rows dt { flex: none; width: 74px; color: var(--faint); }
   .cal-detail-rows dd { margin: 0; color: var(--bone); min-width: 0; word-break: break-word; }
-  .cal-open { display: inline-block; margin-top: 14px; font-size: 12px; color: var(--green-bright); }
+  .cal-open { display: inline-block; margin-top: 14px; font-size: 12px; color: var(--informational); }
 
   /* ---------- source panel ---------- */
   .cal-src {
@@ -557,7 +578,7 @@ export const CALENDAR_CSS = `
   }
   .cal-src-btn:hover:not([disabled]) { color: var(--bone); border-color: var(--lamp); }
   .cal-src-btn[disabled] { opacity: .4; cursor: default; }
-  .cal-src-btn.primary { color: var(--green-bright); border-color: var(--green); }
+  .cal-src-btn.primary { color: var(--informational); border-color: var(--informational); }
   .cal-src-err { font-size: 11px; color: var(--alert); flex-basis: 100%; }
 
   .cal-src-picker {
@@ -592,7 +613,7 @@ export const CALENDAR_CSS = `
   .tw-day:hover { border-color: var(--edge); background: var(--wash); }
   .tw-day.is-today { border-color: var(--sel); background: var(--sel-dim); }
   .tw-day-name { font-size: 9px; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); }
-  .tw-day.is-today .tw-day-name { color: var(--green-bright); }
+  .tw-day.is-today .tw-day-name { color: var(--informational); }
   .tw-day-num { font-size: 13px; font-weight: 600; color: var(--bone); }
   .tw-track {
     position: relative; width: 100%; height: 62px; margin-top: 2px;
@@ -604,6 +625,40 @@ export const CALENDAR_CSS = `
 
   .tw-hint { font-size: 11.5px; color: var(--faint); margin: 10px 0 0; }
 
+  /* ============================================================
+     URGENCY, APPLIED
+
+     Only three of these states paint anything. NORMAL and UPCOMING
+     deliberately do not: a week with nothing pressing in it should
+     read as plain grey type, which is the entire reason an amber row
+     registers instantly when one appears.
+     ============================================================ */
+  .tw-up-row.u-normal .tw-up-when,
+  .tw-up-row.u-upcoming .tw-up-when { color: var(--text-tertiary); }
+  .tw-up-row.u-active .tw-up-when { color: var(--informational); }
+  .tw-up-row.u-soon    .tw-up-when { color: var(--caution); }
+  .tw-up-row.u-urgent  .tw-up-when { color: var(--caution-high); font-weight: 600; }
+  .tw-up-row.u-overdue .tw-up-when { color: var(--critical); font-weight: 600; }
+
+  /* A left edge lit on the row, the way a caution annunciator reads.
+     Nothing is drawn for the quiet states. */
+  .tw-up-row.u-soon,
+  .tw-up-row.u-urgent,
+  .tw-up-row.u-overdue,
+  .tw-up-row.u-active { box-shadow: inset 2px 0 0 currentColor; padding-left: 8px; }
+  .tw-up-row.u-active  { color: var(--informational); }
+  .tw-up-row.u-soon    { color: var(--caution); }
+  .tw-up-row.u-urgent  { color: var(--caution-high); }
+  .tw-up-row.u-overdue { color: var(--critical); }
+
+  .tw-up-tag {
+    flex: none;
+    font-family: var(--font-data);
+    font-size: 9px; letter-spacing: .12em;
+    padding: 1px 5px; margin-left: 6px;
+    border: 1px solid currentColor; border-radius: var(--r-sm);
+  }
+
   .tw-upcoming { margin-top: 12px; }
   .tw-upcoming-h {
     font-family: 'JetBrains Mono', monospace; font-size: 9.5px; letter-spacing: .14em;
@@ -613,7 +668,7 @@ export const CALENDAR_CSS = `
     display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
     background: none; border: none; padding: 5px 0; cursor: pointer; color: var(--bone); font-size: 12.5px;
   }
-  .tw-up-row:hover .tw-up-title { color: var(--green-bright); }
+  .tw-up-row:hover .tw-up-title { color: var(--text-primary); }
   .tw-up-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tw-up-when { flex: none; font-size: 11px; color: var(--muted); }
   .tw-open { margin-top: 12px; padding: 7px 14px; font-size: 12.5px; }
