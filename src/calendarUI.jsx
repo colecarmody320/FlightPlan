@@ -568,7 +568,7 @@ export const CALENDAR_CSS = `
     display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
     padding: 8px 12px; margin-bottom: 12px;
     border: 1px solid var(--line); border-radius: var(--r-md);
-    background: rgba(127,178,212,.05); position: relative;
+    background: var(--panel-2); position: relative;
   }
   .cal-src-name { font-size: 12.5px; color: var(--bone); font-weight: 500; }
   .cal-src-state { font-size: 11px; color: var(--faint); }
@@ -576,7 +576,10 @@ export const CALENDAR_CSS = `
     border: 1px solid var(--edge); background: none; color: var(--muted);
     font-size: 11.5px; padding: 4px 10px; border-radius: var(--r-sm); cursor: pointer;
   }
-  .cal-src-btn:hover:not([disabled]) { color: var(--bone); border-color: var(--lamp); }
+  /* --lamp follows the cabin phase and is RED at night, so a hover
+   state drawn with it read as an error after dark. Interaction is
+   always informational, at every hour. */
+  .cal-src-btn:hover:not([disabled]) { color: var(--text-primary); border-color: var(--informational); }
   .cal-src-btn[disabled] { opacity: .4; cursor: default; }
   .cal-src-btn.primary { color: var(--informational); border-color: var(--informational); }
   .cal-src-err { font-size: 11px; color: var(--alert); flex-basis: 100%; }

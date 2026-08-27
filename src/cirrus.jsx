@@ -1153,11 +1153,11 @@ export const CIRRUS_CSS = `
     width: 34px; height: 34px;
     border-radius: var(--r-md);
     border: 1px solid var(--edge);
-    background: rgba(127,178,212,.06);
+    background: var(--panel-2);
     cursor: pointer;
     transition: border-color .15s ease, background .15s ease;
   }
-  .cirrus-toggle:hover { border-color: var(--lamp); background: rgba(127,178,212,.12); }
+  .cirrus-toggle:hover { border-color: var(--informational); background: var(--informational-dim); }
   .cirrus-toggle.on { border-color: var(--sel); background: var(--sel-dim); }
   .cirrus-toggle.off {
     border-color: transparent;
