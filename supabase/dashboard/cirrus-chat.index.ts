@@ -29,7 +29,14 @@ const MAX_REPLY_CHARS = 8000;
 
 const DEFAULT_MAX_OUTPUT_TOKENS = 800;
 const DEFAULT_TIMEOUT_MS = 20000;
-const DEFAULT_RATE_LIMIT_PER_MINUTE = 10;
+/* Raised from 10 because one user message is no longer one request.
+   A batch like "add these six events" now runs an agent loop — each
+   action's outcome is fed back and the model is asked again — so a
+   single instruction legitimately costs a dozen or more calls. At 10
+   the loop tripped the limiter halfway through and truncated the
+   batch. The per-DAY ceiling is the one that actually bounds cost and
+   is unchanged. */
+const DEFAULT_RATE_LIMIT_PER_MINUTE = 40;
 const DEFAULT_RATE_LIMIT_PER_DAY = 500;
 /* Longer than the provider timeout, so a lease only ever expires for a
    request that genuinely died rather than one still working. */
@@ -638,16 +645,34 @@ const LIMIT_MESSAGES: Record<string, string> = {
    permission before anything runs. This function's only job is to stop
    raw JSON being shown to the user, and to refuse obvious junk early.
    ============================================================ */
+/* Three shapes, tried in order. The first is the protocol; the other
+   two exist because a model that gets cut off mid-emission, or drops
+   the fence entirely, used to have its raw JSON rendered straight into
+   the user's chat. An action payload is a machine instruction and must
+   never be readable as prose, however malformed it arrives. */
 const ACTION_FENCE = /```cirrus-action\s*([\s\S]*?)```/i;
+/** Opened but never closed — a truncated or interrupted reply. */
+const ACTION_FENCE_OPEN = /```cirrus-action\s*([\s\S]*)$/i;
+/** No fence at all: a bare payload sitting at the end of the reply. */
+const ACTION_BARE = /(\{\s*"action"\s*:[\s\S]*\})\s*$/;
 const MAX_ACTION_CHARS = 4000;
 
 function extractAction(reply: string): { text: string; action: unknown | null } {
-  const match = reply.match(ACTION_FENCE);
+  let pattern = ACTION_FENCE;
+  let match = reply.match(pattern);
+  if (!match) {
+    pattern = ACTION_FENCE_OPEN;
+    match = reply.match(pattern);
+  }
+  if (!match) {
+    pattern = ACTION_BARE;
+    match = reply.match(pattern);
+  }
   if (!match) return { text: reply, action: null };
 
   // Remove the block whether or not the JSON inside turns out to parse:
   // a malformed block is still not something to show the user.
-  const text = reply.replace(ACTION_FENCE, "").trim();
+  const text = reply.replace(pattern, "").trim();
   const raw = (match[1] || "").trim();
   if (!raw || raw.length > MAX_ACTION_CHARS) return { text, action: null };
 

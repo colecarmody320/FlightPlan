@@ -89,10 +89,16 @@ export function useCirrusConversation({ mode, page, selectedObject, getRequestEx
     setState((s) => (s.selectedObject === selectedObject ? s : { ...s, selectedObject }));
   }, [selectedObject]);
 
-  const addMessage = useCallback((role, content) => {
+  /**
+   * `hidden` messages are real conversation — the model sees them in
+   * history — but never render. That is how an action's outcome gets
+   * fed back to Cirrus without the user reading machine chatter in
+   * their transcript.
+   */
+  const addMessage = useCallback((role, content, { hidden = false } = {}) => {
     if (!content || !content.trim()) return;
     setState((s) => {
-      const raw = [...s.messages, { id: nextMessageId(), role, content: content.trim(), at: Date.now() }];
+      const raw = [...s.messages, { id: nextMessageId(), role, content: content.trim(), at: Date.now(), hidden }];
       const { kept, dropped } = trimMessages(raw);
       const summary = dropped.length ? summarizeOlderMessages(dropped, s.summary) : s.summary;
       return { ...s, messages: kept, summary };
@@ -130,7 +136,7 @@ export function useCirrusConversation({ mode, page, selectedObject, getRequestEx
    * writes to application data.
    */
   const send = useCallback(
-    async (text) => {
+    async (text, { hidden = false } = {}) => {
       const trimmed = (text || "").trim();
       if (!trimmed) return { ok: false, code: "empty" };
 
@@ -146,7 +152,8 @@ export function useCirrusConversation({ mode, page, selectedObject, getRequestEx
       // sent separately as `message`.
       const history = snapshot.messages.map((m) => ({ role: m.role, content: m.content }));
 
-      addMessage("user", trimmed);
+      // An observation is history, not something the user said.
+      addMessage("user", trimmed, { hidden });
       setState((s) => ({
         ...s,
         sending: true,

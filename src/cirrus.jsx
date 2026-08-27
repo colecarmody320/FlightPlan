@@ -20,6 +20,7 @@ import {
 } from "./googleCalendar.js";
 import { SPEECH_STATES } from "./cirrusSpeech.js";
 import { useCirrusVoiceInput } from "./cirrusVoiceInput.js";
+import { runAgentTurn, summarize, observationFor, STOP } from "./cirrusAgent.js";
 import { useCirrusVoice, diagnoseVoice } from "./cirrusVoice.js";
 import { useCirrusSession, SESSION_STATES } from "./cirrusSession.js";
 import { CIRRUS_LIMIT_CODES } from "./cirrusService.js";
@@ -401,6 +402,37 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
             ? "There's nothing waiting for approval."
             : result.message || "That couldn't be completed.";
         await say(said);
+
+        /* If a batch parked on this card, approving it picks the batch
+           back up. Without this the user would approve the one change
+           and then have to retype everything that came after it —
+           which is the workflow this whole change exists to remove.
+           A rejection deliberately does NOT resume: saying no to a
+           step is a reason to stop and let the user redirect. */
+        const parked = agentRunRef.current;
+        if (parked && result.status === "success") {
+          agentRunRef.current = null;
+          const note = observationFor(
+            parked.state.awaiting?.action || { action: "action" },
+            result,
+            describeOutcome,
+          );
+          const next = await conversation.send(note, { hidden: true });
+          if (next?.ok) {
+            const run = await runAgentTurn({
+              first: next,
+              resume: parked.state,
+              send: (n) => conversation.send(n, { hidden: true }),
+              execute: (a) => proposeActionRef.current(a),
+              describe: describeOutcome,
+              log: agentLog,
+            });
+            agentRunRef.current = run.stop === STOP.AWAITING_APPROVAL ? run : null;
+            await reportRun(run, next);
+          }
+        } else if (parked) {
+          agentRunRef.current = null;
+        }
         return result;
       } finally {
         resolvingRef.current = false;
@@ -519,20 +551,30 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
          Cirrus says afterwards, never what it already said. */
       let outcome = null;
       if (result.action) {
-        outcome = await proposeAction(result.action);
-        // The reply's own audio finishes before an outcome line
-        // starts, so the two never overlap.
+        /* THE AGENT LOOP. Runs the action, shows Cirrus what happened,
+           and asks again — repeating until it stops requesting actions.
+           One "add these six events" therefore costs one message
+           instead of six rounds of "continue".
+
+           Nothing about permission changes here. The loop calls the
+           same proposeAction the single-step path called, so the
+           registry still validates every call and an edit or a delete
+           still parks on the approval card. */
         if (replyAudio) { await replyAudio; replyAudio = null; }
-        if (outcome.status === "success") {
-          await say(describeOutcome(outcome));
-        } else if (outcome.status === "error" || outcome.status === "unsupported") {
-          // Includes "which one did you mean?" — Cirrus asks rather
-          // than picking, and nothing has been changed.
-          await say(outcome.message || "I couldn't do that.");
-        } else if (outcome.status === "pending_exists") {
-          await say(outcome.message);
-        }
-        // approval_required needs no line here: the card says it.
+
+        const run = await runAgentTurn({
+          first: result,
+          send: (note) => conversation.send(note, { hidden: true }),
+          execute: (action) => proposeActionRef.current(action),
+          describe: describeOutcome,
+          log: agentLog,
+        });
+        agentRunRef.current = run.stop === STOP.AWAITING_APPROVAL ? run : null;
+        outcome = run.outcome || null;
+
+        await reportRun(run, result);
+        if (replyAudio) await replyAudio;
+        return;
       }
 
       /* Last line of defence. If the reply claimed a change but no
@@ -569,6 +611,65 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
     (text, meta) => submitText(text, { spoken: true, lowConfidence: Boolean(meta?.low) }),
     [submitText]
   );
+
+  /* Held so the loop calls the CURRENT gate, not the one captured when
+     the run started — a batch can outlive several renders. */
+  const proposeActionRef = useRef(null);
+  proposeActionRef.current = proposeAction;
+
+  /* A run parked on an approval. Approving resumes it, so a mixed
+     batch finishes on one button press rather than a retyped request. */
+  const agentRunRef = useRef(null);
+
+  /* Dev-only. Every tool call and its result, for working out why a
+     batch did what it did. Vite strips this from production. */
+  const agentLog = useCallback((event, fields) => {
+    if (!import.meta?.env?.DEV) return;
+    try {
+      console.log(`[cirrus-agent] ${event}`, fields);
+    } catch {
+      /* a broken console must never break a batch */
+    }
+  }, []);
+
+  /**
+   * The single closing line for a whole run.
+   *
+   * One summary, not a play-by-play: the individual outcomes are
+   * already the reason the batch did what it did, and narrating each
+   * one is the noise this change removes. A single action still gets
+   * its own specific sentence, because "1 change made" is a worse
+   * answer than naming what changed.
+   */
+  const reportRun = useCallback(async (run, firstResult) => {
+    const { stop, state } = run;
+    const only = state.executed.length === 1 && state.failed.length === 0 && state.steps === 1;
+
+    if (only) {
+      await say(describeOutcome(state.executed[0].outcome));
+    } else {
+      const line = summarize(run);
+      if (line) await say(line);
+    }
+
+    // Name what failed; a count alone is not actionable.
+    for (const f of state.failed) {
+      const why = f.outcome?.message || f.outcome?.code;
+      if (why) await say(why);
+    }
+
+    /* The completion guard still runs. If Cirrus claimed a change and
+       nothing actually executed, it is contradicted exactly as before. */
+    if (!state.executed.length && stop !== STOP.AWAITING_APPROVAL) {
+      const correction = verifyClaim({
+        reply: firstResult.reply,
+        action: firstResult.action,
+        executed: state.failed[0]?.outcome || null,
+        actionChannel: firstResult.actionChannel,
+      });
+      if (correction) await say(correction);
+    }
+  }, [say]);
 
   const sessionRef = useRef(null);
 
@@ -764,7 +865,7 @@ export function CirrusDock({ data, update, open, setOpen, page, selectedObject, 
                       )}
                       {conversation.messages.length > 0 && (
                         <div className="cirrus-log-list">
-                          {conversation.messages.map((m) => (
+                          {conversation.messages.filter((m) => !m.hidden).map((m) => (
                             <p key={m.id} className={`cirrus-log-msg ${m.role}`}>
                               {m.content}
                             </p>
