@@ -154,7 +154,7 @@ function GoogleSource({ g }) {
 
   return (
     <div className="cal-src">
-      <span className="cal-dot" style={{ background: g.connected ? "#7FB2D4" : "var(--edge)" }} />
+      <span className="cal-dot" style={{ background: g.connected ? "var(--sel)" : "var(--edge)" }} />
       <span className="cal-src-name">Google Calendar</span>
       <span className="cal-src-state">
         {g.connected ? (g.busy ? "syncing…" : "connected") : "not connected"}
@@ -445,7 +445,7 @@ export const CALENDAR_CSS = `
   .cal-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; }
   .cal-icon-btn {
     flex: none; width: 26px; height: 26px; border: none; background: none; color: var(--muted);
-    border-radius: 7px; cursor: pointer; font-size: 12px;
+    border-radius: var(--r-md); cursor: pointer; font-size: 12px;
   }
   .cal-icon-btn:hover { color: var(--bone); background: rgba(255,255,255,.06); }
 
@@ -482,12 +482,12 @@ export const CALENDAR_CSS = `
     min-height: 26px; padding: 4px 3px; display: flex; flex-direction: column; gap: 3px;
     border-left: 1px solid var(--line); border-bottom: 1px solid var(--line);
   }
-  .cal-allday.is-today { background: rgba(62,142,99,.05); }
+  .cal-allday.is-today { background: var(--sel-dim); }
 
   .cal-chip {
     text-align: left; font-size: 10.5px; line-height: 1.3; color: var(--bone);
     background: var(--raised); border: 1px solid var(--line); border-left-width: 3px;
-    border-radius: 5px; padding: 3px 5px; cursor: pointer;
+    border-radius: var(--r-sm); padding: 3px 5px; cursor: pointer;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .cal-chip:hover { border-color: var(--edge); }
@@ -499,13 +499,13 @@ export const CALENDAR_CSS = `
     font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--faint); white-space: nowrap;
   }
   .cal-col { position: relative; height: 620px; border-left: 1px solid var(--line); }
-  .cal-col.is-today { background: rgba(62,142,99,.05); }
+  .cal-col.is-today { background: var(--sel-dim); }
   .cal-hline { position: absolute; left: 0; right: 0; height: 1px; background: var(--line); opacity: .5; }
 
   .cal-block {
     position: absolute; overflow: hidden; text-align: left;
     background: var(--raised); border: 1px solid var(--line); border-left-width: 3px;
-    border-radius: 5px; padding: 3px 5px; cursor: pointer;
+    border-radius: var(--r-sm); padding: 3px 5px; cursor: pointer;
     display: flex; flex-direction: column; gap: 1px;
   }
   .cal-block:hover { border-color: var(--edge); z-index: 3; }
@@ -530,7 +530,7 @@ export const CALENDAR_CSS = `
   .cal-detail {
     position: fixed; z-index: 51; left: 50%; top: 50%; transform: translate(-50%, -50%);
     width: min(420px, 92vw); max-height: 80vh; overflow-y: auto;
-    background: var(--raised); border: 1px solid var(--line); border-radius: 14px;
+    background: var(--raised); border: 1px solid var(--line); border-radius: var(--r-md);
     padding: 16px; box-shadow: 0 18px 44px rgba(0,0,0,.45);
   }
   .cal-detail-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 12px; }
@@ -546,14 +546,14 @@ export const CALENDAR_CSS = `
   .cal-src {
     display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
     padding: 8px 12px; margin-bottom: 12px;
-    border: 1px solid var(--line); border-radius: 10px;
+    border: 1px solid var(--line); border-radius: var(--r-md);
     background: rgba(127,178,212,.05); position: relative;
   }
   .cal-src-name { font-size: 12.5px; color: var(--bone); font-weight: 500; }
   .cal-src-state { font-size: 11px; color: var(--faint); }
   .cal-src-btn {
     border: 1px solid var(--edge); background: none; color: var(--muted);
-    font-size: 11.5px; padding: 4px 10px; border-radius: 999px; cursor: pointer;
+    font-size: 11.5px; padding: 4px 10px; border-radius: var(--r-sm); cursor: pointer;
   }
   .cal-src-btn:hover:not([disabled]) { color: var(--bone); border-color: var(--lamp); }
   .cal-src-btn[disabled] { opacity: .4; cursor: default; }
@@ -563,7 +563,7 @@ export const CALENDAR_CSS = `
   .cal-src-picker {
     position: absolute; top: calc(100% + 6px); left: 0; z-index: 20;
     width: min(320px, 92vw); background: var(--raised);
-    border: 1px solid var(--line); border-radius: 12px; padding: 12px;
+    border: 1px solid var(--line); border-radius: var(--r-md); padding: 12px;
     box-shadow: 0 12px 32px rgba(0,0,0,.4);
   }
   .cal-src-picker-h {
@@ -585,20 +585,20 @@ export const CALENDAR_CSS = `
   .tw-days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
   .tw-day {
     display: flex; flex-direction: column; align-items: center; gap: 3px;
-    padding: 7px 2px 6px; border: 1px solid var(--line); border-radius: 10px;
+    padding: 7px 2px 6px; border: 1px solid var(--line); border-radius: var(--r-md);
     background: none; cursor: pointer; min-width: 0;
     transition: border-color .15s ease, background .15s ease;
   }
-  .tw-day:hover { border-color: var(--edge); background: rgba(62,142,99,.06); }
-  .tw-day.is-today { border-color: var(--green); background: rgba(62,142,99,.10); }
+  .tw-day:hover { border-color: var(--edge); background: var(--wash); }
+  .tw-day.is-today { border-color: var(--sel); background: var(--sel-dim); }
   .tw-day-name { font-size: 9px; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); }
   .tw-day.is-today .tw-day-name { color: var(--green-bright); }
   .tw-day-num { font-size: 13px; font-weight: 600; color: var(--bone); }
   .tw-track {
     position: relative; width: 100%; height: 62px; margin-top: 2px;
-    background: var(--surface); border-radius: 5px; overflow: hidden;
+    background: var(--surface); border-radius: var(--r-sm); overflow: hidden;
   }
-  .tw-block { position: absolute; border-radius: 2px; opacity: .85; }
+  .tw-block { position: absolute; border-radius: var(--r-sm); opacity: .85; }
   .tw-now { position: absolute; left: 0; right: 0; height: 1px; background: var(--alert); }
   .tw-count { font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--faint); }
 

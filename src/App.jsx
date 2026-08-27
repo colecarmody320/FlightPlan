@@ -604,12 +604,23 @@ function cabinPhase(d = new Date()) {
   return "night";                     // 21:00–23:59
 }
 
+/* Panel lighting through the day.
+
+   A real cockpit's panel does not change colour; the light falling on
+   it does. So the ground stays graphite at every phase and only its
+   temperature shifts — cool at midday, warm at dusk, nearly black with
+   a red lamp at night, the way panel lighting is actually run so it
+   does not wreck night vision.
+   
+   Kept deliberately narrow. The previous set tinted the whole app
+   green, which is why green survived every attempt to theme around
+   it. */
 const CABIN = {
-  predawn: { lamp: "#D98F5A", ground: "#0B0E0C", g1: "rgba(217,143,90,.13)", g2: "rgba(74,68,104,.15)" },
-  dawn:  { lamp: "#E8B36A", ground: "#11150F", g1: "rgba(232,179,106,.22)", g2: "rgba(201,148,92,.13)" },
-  day:   { lamp: "#7FB2D4", ground: "#0D1411", g1: "rgba(127,178,212,.20)", g2: "rgba(62,142,99,.17)"  },
-  dusk:  { lamp: "#C98A5C", ground: "#0A0F0C", g1: "rgba(201,138,92,.17)",  g2: "rgba(52,72,98,.18)"   },
-  night: { lamp: "#C4483A", ground: "#070A08", g1: "rgba(196,72,58,.13)",   g2: "rgba(31,81,56,.11)"   },
+  predawn: { lamp: "#D9924F", ground: "#0A0C0E", g1: "rgba(217,146,79,.08)",  g2: "rgba(255,255,255,.022)" },
+  dawn:    { lamp: "#E0A860", ground: "#0F1215", g1: "rgba(224,168,96,.10)",  g2: "rgba(255,255,255,.030)" },
+  day:     { lamp: "#55A6CE", ground: "#0E1113", g1: "rgba(85,166,206,.10)",  g2: "rgba(255,255,255,.030)" },
+  dusk:    { lamp: "#C98A5C", ground: "#0B0E10", g1: "rgba(201,138,92,.09)",  g2: "rgba(255,255,255,.022)" },
+  night:   { lamp: "#C4483A", ground: "#08090B", g1: "rgba(196,72,58,.07)",   g2: "rgba(255,255,255,.015)" },
 };
 
 function useCabin() {
@@ -1322,6 +1333,44 @@ export default function CollegeHub() {
     await supabase.auth.signOut();
   };
 
+  /* The selector scrolls on a phone, so the selected key can sit off
+     screen after a tab change or a reload — the user then sees a strip
+     with nothing lit in it and no idea where they are. Bring it into
+     view whenever it changes.
+
+     `nearest` rather than `center`: centring yanks the whole strip
+     around on desktop, where the key was already perfectly visible. */
+  const navRef = useRef(null);
+  const activeTabRef = useRef(null);
+  useEffect(() => {
+    const el = activeTabRef.current;
+    const nav = navRef.current;
+    if (!el || !nav) return;
+
+    /* Computed rather than delegated to scrollIntoView({inline:"nearest"}),
+       which measurably under-scrolls here — it left the selected key
+       about nine pixels past the right edge, which is precisely the
+       half-visible word this was meant to eliminate. Rects are used
+       instead of offsetLeft so the maths does not depend on which
+       ancestor happens to be the offsetParent. */
+    const pad = 16;                       // breathing room at the edge
+    const navBox = nav.getBoundingClientRect();
+    const tabBox = el.getBoundingClientRect();
+    const overRight = tabBox.right + pad - navBox.right;
+    const overLeft = navBox.left - (tabBox.left - pad);
+
+    let delta = 0;
+    if (overRight > 0) delta = overRight;
+    else if (overLeft > 0) delta = -overLeft;
+    if (!delta) return;
+
+    if (typeof nav.scrollBy === "function") {
+      nav.scrollBy({ left: delta, behavior: "smooth" });
+    } else {
+      nav.scrollLeft += delta;
+    }
+  }, [tab]);
+
   const [walking, setWalking] = useState(false);
   useEffect(() => {
     if (!data) return;
@@ -1421,7 +1470,7 @@ export default function CollegeHub() {
         />
         <span style={S.wordmark}>FlightPlan</span>
 
-        <div className="nav">
+        <div className="nav" ref={navRef}>
           {[
             ["home", "Home"],
             ["cards", "Cards"],
@@ -1435,6 +1484,8 @@ export default function CollegeHub() {
           ].map(([k, label]) => (
             <button
               key={k}
+              ref={tab === k ? activeTabRef : null}
+              aria-current={tab === k ? "page" : undefined}
               className={tab === k ? "tab on" : "tab"}
               onClick={() => {
                 setTab(k);
@@ -1563,7 +1614,7 @@ function Home({ data, go, update, openCirrus, user }) {
                 {g.current === null ? "—" : `${g.current.toFixed(1)}% (${letterFor(g.current)})`}
               </td>
               <td style={S.td}>{c.target}%</td>
-              <td style={{ ...S.td, color: gap === null ? "#6B7F73" : gap < 0 ? "#C4705A" : "#6FBF8F" }}>
+              <td style={{ ...S.td, color: gap === null ? "var(--faint)" : gap < 0 ? "var(--warn)" : "var(--ok)" }}>
                 {gap === null ? "—" : `${gap > 0 ? "+" : ""}${gap.toFixed(1)}`}
               </td>
               <td style={S.td}>{g.totalWeight ? `${g.remaining}%` : "—"}</td>
@@ -3460,10 +3511,10 @@ function Gym({ data, update }) {
                     </td>
                     <td style={S.td}>{b.miles || "—"}</td>
                     <td style={S.td}>{b.minutes}</td>
-                    <td style={{ ...S.td, color: b.days >= target ? "#6FBF8F" : "#C4705A" }}>
+                    <td style={{ ...S.td, color: b.days >= target ? "var(--ok)" : "var(--warn)" }}>
                       {b.days >= target ? "yes" : "no"}
                     </td>
-                    <td style={{ ...S.td, color: b.miles >= milesTarget ? "#6FBF8F" : "#C4705A" }}>
+                    <td style={{ ...S.td, color: b.miles >= milesTarget ? "var(--ok)" : "var(--warn)" }}>
                       {b.miles >= milesTarget ? "yes" : "no"}
                     </td>
                   </tr>
@@ -4249,25 +4300,87 @@ function Section({ title, children }) {
 }
 
 const CSS = `
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&display=swap');
 
   * { box-sizing: border-box; }
 
+  /* ============================================================
+     FLIGHTPLAN DESIGN SYSTEM — instrument panel
+
+     One palette, one spacing scale, one radius scale. Every colour
+     below is a token; nothing downstream should hardcode a hex.
+
+     THE COLOUR RULE. Graphite is structure — panels, bezels, borders,
+     separators. Colour is MEANING, and only meaning. If something is
+     green it is because that thing is complete, connected or on
+     track, never because green looked nice there. A cockpit works
+     because a lit annunciator always means something; an interface
+     that decorates with status colour throws that away.
+     ============================================================ */
   .hub {
-    --surface: #141E19;
-    --raised: #1B2822;
-    --line: #26362E;
-    --edge: #33473C;
-    --green: #3E8E63;
-    --green-deep: #1F5138;
-    --green-bright: #6FBF8F;
-    --bone: #E8EFE9;
-    --muted: #8FA396;
-    --faint: #6B7F73;
-    --alert: #C4705A;
-    --lamp: #7FB2D4;
-    --glow1: rgba(127,178,212,.20);
-    --glow2: rgba(62,142,99,.17);
+    /* --- panel surfaces, deepest to nearest --- */
+    --panel-0: #0E1113;   /* the ground behind the panel */
+    --panel-1: #161A1D;   /* primary panel face */
+    --panel-2: #1C2124;   /* recessed well / data region */
+    --panel-3: #252A2F;   /* control face, raised */
+    --line:    #2B3136;   /* hairline separator */
+    --edge:    #3A4249;   /* bezel edge, deliberate and visible */
+
+    /* --- type --- */
+    --bone:  #E7EAEC;     /* primary */
+    --muted: #98A1A9;     /* secondary */
+    /* Lifted from #6A737B, which measured 3.93:1 on the panel — below
+       readable at the 9px these labels are set in. Engraved text on a
+       panel is small, never faint. */
+    --faint: #7D868E;     /* micro-labels, units, captions */
+
+    /* --- status. Aviation semantics, used sparingly. --- */
+    --ok:       #4FAE72;  /* normal, complete, connected, on track */
+    --ok-dim:   rgba(79,174,114,.13);
+    --caution:  #DFA23A;  /* attention, due soon, degraded */
+    --caution-dim: rgba(223,162,58,.13);
+    --warn:     #D75443;  /* overdue, failed, destructive */
+    --warn-dim: rgba(215,84,67,.13);
+    --sel:      #55A6CE;  /* selected, interactive, informational */
+    --sel-dim:  rgba(85,166,206,.13);
+
+    /* Legacy aliases. The old names are referenced in a lot of places;
+       pointing them at the new palette converts those call sites
+       without a risky sweep through working markup. */
+    --surface: var(--panel-1);
+    --raised: var(--panel-2);
+    --green: var(--ok);
+    --green-bright: var(--ok);
+    --green-deep: var(--ok-dim);
+    --alert: var(--warn);
+
+    /* --- spacing scale. Use these, not arbitrary numbers. --- */
+    --s1: 4px;  --s2: 8px;  --s3: 12px; --s4: 16px;
+    --s5: 24px; --s6: 32px; --s7: 48px;
+
+    /* --- radii. Engineered, not bubbly. --- */
+    --r-sm: 2px;  --r-md: 3px;  --r-lg: 4px;
+
+    /* --- panel construction ---
+       A hairline highlight along the top and a shadow along the
+       bottom is the whole trick: it reads as a machined face catching
+       light without a single gradient or fake screw. */
+    --bezel: inset 0 1px 0 rgba(255,255,255,.035), inset 0 -1px 0 rgba(0,0,0,.30);
+    --well:  inset 0 1px 2px rgba(0,0,0,.42);
+
+    --font-display: 'Source Serif 4', 'Iowan Old Style', Georgia, serif;
+    --font-ui: 'Inter', system-ui, -apple-system, sans-serif;
+    --font-data: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+    /* Interaction is a change in light on the panel, not a colour.
+       These are what hover and press use; colour is reserved for
+       status. */
+    --wash: rgba(255,255,255,.045);
+    --wash-strong: rgba(255,255,255,.075);
+
+    --lamp: var(--sel);
+    --glow1: rgba(85,166,206,.10);
+    --glow2: rgba(255,255,255,.03);
     transition: background 3s linear;
   }
 
@@ -4283,7 +4396,7 @@ const CSS = `
   .hub > * { position: relative; z-index: 1; }
 
   /* night vision: instruments and micro-labels go red */
-  .hub.night { --muted: #A08C88; --faint: #7E6A67; }
+  .hub.night { --muted: #A08C88; --faint: #8E7A77; }
   .hub.night .dial-arc { stroke: var(--lamp); }
   .hub.night .dial-needle polygon { fill: var(--lamp); }
   .hub.night .dial-tick.major { stroke: var(--lamp); }
@@ -4292,11 +4405,11 @@ const CSS = `
   .hub.night .sock .s1 { fill: var(--lamp); }
   .hub.night .sock .s3 { fill: #8A3830; }
 
-  .hub ::selection { background: var(--green); color: #0D1411; }
+  .hub ::selection { background: var(--sel); color: var(--panel-0); }
 
   .hub button:focus-visible, .hub input:focus-visible,
   .hub textarea:focus-visible, .hub select:focus-visible {
-    outline: 2px solid var(--green-bright); outline-offset: 2px;
+    outline: 2px solid var(--sel); outline-offset: 2px;
   }
   .hub button[disabled] { opacity: .35; cursor: default; }
 
@@ -4304,7 +4417,7 @@ const CSS = `
     background: var(--raised);
     color: var(--bone);
     border: 1px solid var(--line);
-    border-radius: 10px;
+    border-radius: var(--r-md);
     font-family: 'Inter', system-ui, sans-serif;
   }
   .hub input::placeholder, .hub textarea::placeholder { color: var(--faint); }
@@ -4323,86 +4436,130 @@ const CSS = `
     display: inline-flex; align-items: center; justify-content: center;
     padding: 0; cursor: pointer;
     width: 34px; height: 34px; flex: none;
-    border-radius: 10px;
+    border-radius: var(--r-md);
     border: 1px solid var(--edge);
-    background: linear-gradient(150deg, var(--green-deep), transparent);
+    background: var(--panel-2);
     transition: transform .35s cubic-bezier(.22,.61,.36,1);
   }
   .hub .bar:hover .mark { transform: translateX(3px) rotate(-8deg); }
   .hub .mark-body { fill: var(--bone); opacity: .9; }
-  .hub .nav-red   { fill: #E0544A; animation: strobe 2.6s ease-in-out infinite; }
-  .hub .nav-green { fill: #62D08C; animation: strobe 2.6s ease-in-out .18s infinite; }
+  .hub .nav-red   { fill: var(--warn); animation: strobe 2.6s ease-in-out infinite; }
+  .hub .nav-green { fill: var(--ok); animation: strobe 2.6s ease-in-out .18s infinite; }
   @keyframes strobe {
     0%, 84%, 100% { opacity: .28; }
     88%, 94% { opacity: 1; }
   }
 
-  /* nav scrolls sideways instead of wrapping */
+  /* The selector strip: a recessed well the keys sit inside. */
   .hub .nav {
     display: flex; align-items: center; gap: 2px;
     flex: 1; min-width: 0;
     overflow-x: auto;
     scrollbar-width: none;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: var(--r-md);
+    box-shadow: var(--well);
+    padding: 3px;
+    /* Keeps the selected key clear of the rounded ends when scrolled. */
+    scroll-padding: 0 12px;
   }
   .hub .nav::-webkit-scrollbar { display: none; }
   .hub .nav .tab { flex: none; white-space: nowrap; }
 
+  /* ---- system selector ----
+     Modelled on an avionics soft-key strip rather than a set of
+     pills: keys sit in a recessed well, the selected one is LIT from
+     its top edge and raised out of the well. The cue is light and
+     depth, which is how a real panel shows selection, not a coloured
+     capsule floating on a background. */
   .hub .tab {
-    background: none; border: none;
+    position: relative;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--r-sm);
     color: var(--muted);
-    font-family: 'Inter', system-ui, sans-serif;
-    font-size: 14px; font-weight: 500;
-    padding: 7px 11px; border-radius: 8px;
+    font-family: var(--font-ui);
+    font-size: 13px; font-weight: 500;
+    letter-spacing: .01em;
+    padding: 8px 12px;
     cursor: pointer;
-    transition: color .15s ease, background .15s ease;
+    transition: color .12s linear, background .12s linear, border-color .12s linear;
   }
-  .hub .tab:hover { color: var(--bone); background: rgba(62,142,99,.10); }
-  .hub .tab.on { color: var(--green-bright); background: rgba(62,142,99,.14); }
+  .hub .tab:hover { color: var(--bone); background: var(--wash); }
+  .hub .tab.on {
+    color: var(--bone);
+    background: var(--panel-3);
+    border-color: var(--line);
+    box-shadow: var(--bezel);
+  }
+  /* the lit edge: thin, precise, and the only colour in the strip */
+  .hub .tab.on::before {
+    content: "";
+    position: absolute; left: 6px; right: 6px; top: -1px; height: 2px;
+    background: var(--sel);
+    box-shadow: 0 0 6px var(--sel-dim);
+  }
 
-  /* buttons + prop wash */
+  /* ---- controls ----
+     Squared, machined, and legible. The old treatment was a 999px
+     capsule with a diagonal sheen that swept across on hover — the
+     single most "generated" thing in the interface. A control on a
+     panel does not shimmer; it depresses. */
   .hub .btn {
     position: relative;
-    overflow: hidden;
-    border-radius: 999px;
-    transition: border-color .15s ease, color .15s ease, transform .1s ease;
+    border-radius: var(--r-sm);
+    background: var(--panel-3);
+    border: 1px solid var(--edge);
+    box-shadow: var(--bezel);
+    font-family: var(--font-ui);
+    font-weight: 500;
+    transition: background .12s linear, border-color .12s linear, color .12s linear;
   }
-  .hub .btn::after {
-    content: "";
-    position: absolute; inset: 0;
-    background: linear-gradient(105deg, transparent 30%, rgba(111,191,143,.18) 50%, transparent 70%);
-    transform: translateX(-120%);
-    transition: transform .55s cubic-bezier(.22,.61,.36,1);
-    pointer-events: none;
+  .hub .btn:hover:not([disabled]) { background: var(--wash-strong); border-color: var(--muted); color: var(--bone); }
+  .hub .btn:active:not([disabled]) {
+    /* pressed into the panel rather than nudged down the page */
+    background: var(--panel-2);
+    box-shadow: var(--well);
+    transform: none;
   }
-  .hub .btn:hover:not([disabled])::after { transform: translateX(120%); }
-  .hub .btn:hover:not([disabled]) { border-color: var(--green); color: var(--green-bright); }
-  .hub .btn:active:not([disabled]) { transform: translateY(1px); }
 
+  /* Primary action. Solid, not a gradient, and no coloured glow. */
   .hub .cta {
-    border: none;
-    background: linear-gradient(135deg, var(--green), var(--green-deep));
-    color: #0D1411;
+    background: var(--sel);
+    border: 1px solid var(--sel);
+    color: #08262F;
     font-weight: 600;
-    box-shadow: 0 6px 20px rgba(62,142,99,.28);
+    box-shadow: var(--bezel);
   }
-  .hub .cta:hover:not([disabled]) { color: #0D1411; filter: brightness(1.1); }
+  .hub .cta:hover:not([disabled]) { background: #6BB4D8; border-color: #6BB4D8; color: #08262F; }
+  .hub .cta:active:not([disabled]) { background: var(--sel); box-shadow: var(--well); }
 
-  .hub .link { transition: color .15s ease; }
-  .hub .link:hover { color: var(--green-bright); }
+  /* Destructive keeps its own colour, always. */
+  .hub .btn.danger { border-color: var(--warn); color: var(--warn); }
+  .hub .btn.danger:hover:not([disabled]) { background: var(--warn-dim); border-color: var(--warn); color: var(--warn); }
+
+  .hub .link { transition: color .12s linear; }
+  .hub .link:hover { color: var(--sel); }
 
   /* hero */
   .hub .hero-h {
-    font-weight: 800;
-    font-size: clamp(38px, 7.4vw, 66px);
-    line-height: 1.02;
-    letter-spacing: -.03em;
+    font-family: var(--font-display);
+    font-weight: 600;
+    /* Was clamped to 66px. A title that size is a poster, not an
+       instrument label — it pushed the actual information below the
+       fold on every phone. */
+    font-size: clamp(30px, 4.6vw, 44px);
+    line-height: 1.1;
+    letter-spacing: -.015em;
     margin: 0;
   }
+  /* Emphasis by weight and hue, not by a gradient poured into the
+     glyphs. Gradient text was the loudest generated-looking element
+     on the page. */
   .hub .hero-h em {
-    font-style: normal;
-    background: linear-gradient(100deg, var(--green-bright), var(--green));
-    -webkit-background-clip: text; background-clip: text;
-    -webkit-text-fill-color: transparent; color: transparent;
+    font-style: italic;
+    color: var(--bone);
   }
   .hub .hero   { animation: rise .6s cubic-bezier(.22,.61,.36,1) both; }
   .hub .hero-2 { animation: rise .6s .1s cubic-bezier(.22,.61,.36,1) both; }
@@ -4440,8 +4597,8 @@ const CSS = `
     z-index: 0;
   }
   .hub .prop-blades {
-    fill: var(--green-bright);
-    opacity: .13;
+    fill: var(--muted);
+    opacity: .09;
     transform-origin: 100px 100px;
     animation: propSpin 2.8s cubic-bezier(.12,.72,.24,1) both;
   }
@@ -4449,7 +4606,7 @@ const CSS = `
   .hub .prop-bolt { fill: var(--bone); opacity: .3; }
   .hub .prop-disc {
     fill: none;
-    stroke: var(--green-bright);
+    stroke: var(--muted);
     stroke-width: 1;
     stroke-dasharray: 3 9;
     opacity: 0;
@@ -4476,8 +4633,8 @@ const CSS = `
   .hub .tile {
     position: relative;
     border: 1px solid var(--line);
-    border-radius: 14px;
-    background: linear-gradient(160deg, rgba(62,142,99,.07), transparent 60%), var(--surface);
+    border-radius: var(--r-md);
+    background: var(--surface);
     padding: 13px 13px 14px;
     min-width: 0;
     transition: border-color .18s ease, transform .18s ease;
@@ -4576,7 +4733,7 @@ const CSS = `
     display: inline-block;
     width: 6px; height: 11px;
     margin-left: 2px;
-    background: var(--green-bright);
+    background: var(--sel);
     vertical-align: -1px;
     animation: blink .9s steps(1) infinite;
   }
@@ -4623,8 +4780,97 @@ const CSS = `
   }
 
   /* panels */
+  /* ============================================================
+     TYPOGRAPHY
+
+     Two voices, on purpose.
+
+     SERIF names things. Page titles and section headings are the
+     labels engraved on a panel — they are read once, they orient you,
+     and they carry the identity. A serif does that with authority and
+     it is the one place warmth belongs.
+
+     SANS AND MONO carry the operational load: numbers, times, task
+     text, controls. These are scanned under time pressure, so they get
+     the neutral, unambiguous faces. Tabular figures matter more here
+     than character — a column of times has to line up.
+
+     Nothing dense is ever set in serif, and no heading pretends to be
+     data.
+     ============================================================ */
+  .hub .t-display,
+  .hub .hero-h,
+  .hub h1, .hub h2 {
+    font-family: var(--font-display);
+    font-weight: 600;
+    letter-spacing: -.01em;
+  }
+  /* Data faces get tabular figures so columns align down the page. */
+  .hub .t-data, .hub table td, .hub table th,
+  .hub .tile-value, .hub input, .hub select {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1;
+  }
+  /* The engraved micro-label: the workhorse of a panel. */
+  .hub .t-label {
+    font-family: var(--font-data);
+    font-size: 9px;
+    font-weight: 500;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+
+  /* ============================================================
+     PANEL CONSTRUCTION
+
+     Three depths, and only three: the ground behind everything, the
+     panel face bolted to it, and wells recessed into that face for
+     data. Nothing floats. The distinction is carried by one hairline
+     border and one inset highlight, never by a drop shadow — a shadow
+     implies the surface is hovering above the page, which is the
+     opposite of built-in.
+     ============================================================ */
+  .hub .panel-face {
+    background: var(--panel-1);
+    border: 1px solid var(--line);
+    border-radius: var(--r-md);
+    box-shadow: var(--bezel);
+  }
+  .hub .panel-well {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+    box-shadow: var(--well);
+  }
+  /* A region header: engraved label, hairline rule running to the edge. */
+  .hub .panel-head {
+    display: flex; align-items: baseline; gap: var(--s2);
+    padding-bottom: var(--s2);
+    margin-bottom: var(--s3);
+    border-bottom: 1px solid var(--line);
+  }
+
+  /* Status annunciators. Small, and never decorative. */
+  .hub .ann {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--font-data);
+    font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: var(--r-sm);
+    border: 1px solid transparent;
+  }
+  .hub .ann::before {
+    content: ""; width: 5px; height: 5px; border-radius: 50%;
+    background: currentColor;
+  }
+  .hub .ann-ok      { color: var(--ok);      border-color: var(--ok);      background: var(--ok-dim); }
+  .hub .ann-caution { color: var(--caution); border-color: var(--caution); background: var(--caution-dim); }
+  .hub .ann-warn    { color: var(--warn);    border-color: var(--warn);    background: var(--warn-dim); }
+  .hub .ann-info    { color: var(--sel);     border-color: var(--sel);     background: var(--sel-dim); }
+
   .hub .panel {
-    border-radius: 16px;
+    border-radius: var(--r-md);
     box-shadow: 0 10px 30px rgba(0,0,0,.30);
     animation: panelIn .5s cubic-bezier(.22,.61,.36,1) both;
     transition: border-color .18s ease;
@@ -4707,24 +4953,31 @@ const CSS = `
     position: relative; height: 7px;
     background: var(--raised);
     border: 1px solid var(--line);
-    border-radius: 999px;
+    border-radius: var(--r-sm);
     overflow: hidden;
   }
   .hub .gauge span {
     display: block; height: 100%;
-    background: linear-gradient(90deg, var(--green-deep), var(--green));
+    background: var(--sel);
     transition: width .45s ease;
   }
-  .hub .gauge.met span { background: linear-gradient(90deg, var(--green), var(--green-bright)); }
+  /* Met target: the one place a gauge earns green. */
+  .hub .gauge.met span { background: var(--ok); }
 
-  .hub table { font-variant-numeric: tabular-nums; }
+  /* Base type for data regions. The inline style objects also set
+     these, but a table rendered without them was falling back to
+     black Times on a black panel — invisible. Structure should not
+     depend on a JS style object being remembered. */
+  .hub table { font-variant-numeric: tabular-nums; color: var(--bone); font-family: var(--font-ui); }
+  .hub th { color: var(--faint); }
+  .hub button { color: var(--bone); font-family: var(--font-ui); }
   .hub tbody tr { transition: background .15s ease; }
-  .hub tbody tr:hover { background: rgba(62,142,99,.06); }
+  .hub tbody tr:hover { background: var(--wash); }
   .hub hr { border: none; border-top: 1px solid var(--line); margin: 14px 0; }
   .hub optgroup { color: var(--muted); background: var(--raised); }
   .hub option { color: var(--bone); background: var(--raised); }
-  .hub a { color: var(--green-bright); }
-  .hub code { font-family: 'JetBrains Mono', monospace; color: var(--green-bright); font-size: 12px; }
+  .hub a { color: var(--sel); }
+  .hub code { font-family: var(--font-data); color: var(--muted); font-size: 12px; }
   .hub ol li::marker, .hub ul li::marker { color: var(--green); }
 
   /* ============ review: a physical card on a table ============ */
@@ -4744,12 +4997,12 @@ const CSS = `
     font-size: 11px; color: var(--faint);
   }
   .hub .rv-bar {
-    height: 2px; background: var(--raised); border-radius: 999px;
+    height: 2px; background: var(--raised); border-radius: var(--r-sm);
     overflow: hidden; margin-bottom: 26px;
   }
   .hub .rv-bar span {
     display: block; height: 100%;
-    background: linear-gradient(90deg, var(--green-deep), var(--green-bright));
+    background: var(--sel);
     transition: width .3s ease;
   }
 
@@ -4764,7 +5017,7 @@ const CSS = `
   /* the cards waiting underneath */
   .hub .rv-behind {
     position: absolute; inset: 10px 0 18px;
-    border-radius: 14px;
+    border-radius: var(--r-md);
     border: 1px solid var(--line);
     background: var(--surface);
     box-shadow: 0 10px 24px rgba(0,0,0,.28);
@@ -4784,7 +5037,7 @@ const CSS = `
     touch-action: pan-y;
     -webkit-tap-highlight-color: transparent;
   }
-  .hub .rv-card:focus-visible { outline: 2px solid var(--green-bright); outline-offset: 6px; border-radius: 16px; }
+  .hub .rv-card:focus-visible { outline: 2px solid var(--green-bright); outline-offset: 6px; border-radius: var(--r-md); }
 
   .hub .rv-inner {
     position: relative; width: 100%; height: 100%;
@@ -4798,7 +5051,7 @@ const CSS = `
     backface-visibility: hidden;
     -webkit-backface-visibility: hidden;
     display: flex; flex-direction: column;
-    border-radius: 14px;
+    border-radius: var(--r-md);
     border: 1px solid var(--edge);
     background:
       linear-gradient(168deg, rgba(255,255,255,.035), transparent 55%),
@@ -4834,7 +5087,7 @@ const CSS = `
     margin: 0; text-align: center; white-space: pre-wrap;
     border-top: 1px solid var(--line); padding-top: 12px;
   }
-  .hub .rv-img { max-width: 100%; max-height: 190px; object-fit: contain; margin: 0 auto; border-radius: 8px; }
+  .hub .rv-img { max-width: 100%; max-height: 190px; object-fit: contain; margin: 0 auto; border-radius: var(--r-md); }
   .hub .rv-hint {
     font-family: 'JetBrains Mono', monospace;
     font-size: 9px; letter-spacing: .16em; text-transform: uppercase;
@@ -4846,7 +5099,7 @@ const CSS = `
     font-family: 'JetBrains Mono', monospace;
     font-size: 10px; letter-spacing: .16em; text-transform: uppercase;
     color: var(--green-bright);
-    border: 1px solid var(--green); border-radius: 999px;
+    border: 1px solid var(--green); border-radius: var(--r-sm);
     padding: 4px 12px; background: var(--ground);
     pointer-events: none;
   }
@@ -4868,7 +5121,7 @@ const CSS = `
   .hub .rv-btn {
     display: flex; flex-direction: column; align-items: center; gap: 3px;
     padding: 11px 8px;
-    border-radius: 12px;
+    border-radius: var(--r-md);
     border: 1px solid var(--edge);
     background: transparent;
     color: var(--bone);
@@ -4876,23 +5129,23 @@ const CSS = `
     font-family: inherit;
     transition: border-color .15s ease, background .15s ease, color .15s ease;
   }
-  .hub .rv-btn:hover { background: rgba(62,142,99,.1); }
+  .hub .rv-btn:hover { background: var(--wash); }
   .hub .rv-btn-l { font-size: 14px; font-weight: 600; }
   .hub .rv-btn-i {
     font-family: 'JetBrains Mono', monospace;
     font-size: 10px; color: var(--faint); letter-spacing: .08em;
   }
-  .hub .rv-btn.again:hover { border-color: #C4705A; color: #C4705A; }
-  .hub .rv-btn.hard:hover  { border-color: #D98F5A; color: #D98F5A; }
+  .hub .rv-btn.again:hover { border-color: var(--warn); color: var(--warn); }
+  .hub .rv-btn.hard:hover  { border-color: var(--caution); color: var(--caution); }
   .hub .rv-btn.good:hover  { border-color: var(--green); color: var(--green-bright); }
   .hub .rv-btn.easy:hover  { border-color: var(--green-bright); color: var(--green-bright); }
   .hub .rv-btn.reveal {
-    border: none;
-    background: linear-gradient(135deg, var(--green), var(--green-deep));
-    color: #0D1411;
-    box-shadow: 0 6px 20px rgba(62,142,99,.28);
+    border: 1px solid var(--sel);
+    background: var(--sel);
+    color: #08262F;
+    box-shadow: var(--bezel);
   }
-  .hub .rv-btn.reveal .rv-btn-i { color: rgba(13,20,17,.6); }
+  .hub .rv-btn.reveal .rv-btn-i { color: rgba(8,38,47,.55); }
 
   .hub .rv-foot {
     display: flex; align-items: center; flex-wrap: wrap; gap: 4px;
@@ -4910,9 +5163,9 @@ const CSS = `
 
   @media (max-width: 560px) {
     .hub .rv-card { aspect-ratio: 4 / 3; min-height: 260px; }
-    .hub .rv-face { padding: 20px 20px 16px; border-radius: 12px; }
+    .hub .rv-face { padding: 20px 20px 16px; border-radius: var(--r-md); }
     .hub .rv-rate { gap: 6px; }
-    .hub .rv-btn { padding: 10px 4px; border-radius: 10px; }
+    .hub .rv-btn { padding: 10px 4px; border-radius: var(--r-md); }
     .hub .rv-btn-l { font-size: 13px; }
     .hub .rv-keys { display: none; }
   }
@@ -4939,8 +5192,45 @@ const CSS = `
   @media (max-width: 720px) {
     .hub { padding-left: 14px !important; padding-right: 14px !important; }
 
-    .hub .bar { gap: 10px; padding: 12px 0; }
+    /* ============================================================
+       MOBILE NAVIGATION
+
+       The old bar was one flex row — wordmark, nav, Cirrus — with the
+       nav on flex:1 with min-width:0. On a phone that left it roughly
+       a word and a half of visible width, so every label was clipped
+       mid-word and the selected tab was usually scrolled out of sight.
+       Shrinking the type would only have made unreadable text smaller.
+
+       So the row is split. The wordmark and Cirrus keep the top line;
+       the selector gets a full-width line of its own underneath, which
+       is the width it actually needed. It still scrolls, but now it
+       scrolls across the whole screen instead of a gap.
+       ============================================================ */
+    .hub .bar {
+      gap: var(--s3);
+      padding: 10px 0;
+      flex-wrap: wrap;
+      row-gap: 10px;
+    }
     .hub .cta-desktop { display: none; }
+
+    .hub .bar .nav {
+      order: 10;              /* below the wordmark and Cirrus */
+      flex: 1 0 100%;         /* its own full-width row */
+      min-width: 100%;
+      /* No scroll-snap: it realigns to a key's leading edge and
+         fights the "keep the selected key visible" scroll, pushing
+         the very thing we just revealed back off screen. */
+    }
+    .hub .bar .nav .tab {
+      /* A comfortable touch target without shrinking the label: the
+         44px minimum comes from the height, not from padding that
+         would steal the horizontal room the words need. */
+      min-height: 40px;
+      display: inline-flex; align-items: center;
+      font-size: 13px;
+      padding: 8px 12px;
+    }
 
     .hub .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
     .hub .tile.wide { grid-column: span 2; }
@@ -4948,7 +5238,6 @@ const CSS = `
     .hub .rwy-num { font-size: 23px; }
     .hub .tile { padding: 12px; }
     .hub .gauge-tile .dial { width: 62px; height: 62px; }
-    .hub .tab { font-size: 13px; padding: 6px 9px; }
     .hub .prop { display: none; }
 
     .hub .sock-wrap { right: 8px; bottom: 8px; transform: scale(.8); transform-origin: bottom right; }
@@ -4969,26 +5258,27 @@ const CSS = `
     }
 
     .hub section { padding: 14px 14px 16px !important; }
-    .hub .panel { border-radius: 14px; }
+    .hub .panel { border-radius: var(--r-md); }
   }
 `;
 
 const BODY = "'Inter', system-ui, -apple-system, sans-serif";
+const DISPLAY = "'Source Serif 4', 'Iowan Old Style', Georgia, serif";
 const MONO = "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace";
 
 const S = {
   page: {
     fontFamily: BODY,
     fontSize: 14,
-    color: "#E8EFE9",
-    background: "#0D1411",
+    color: "var(--bone)",
+    background: "var(--panel-0)",
     padding: "0 18px 48px",
     maxWidth: 1040,
     margin: "0 auto",
     minHeight: "100vh",
     lineHeight: 1.55,
   },
-  wordmark: { fontSize: 17, fontWeight: 700, letterSpacing: "-.02em", color: "#E8EFE9" },
+  wordmark: { fontSize: 17, fontWeight: 700, letterSpacing: "-.02em", color: "var(--bone)" },
   subnav: { display: "flex", flexWrap: "wrap", gap: 4, margin: "0 0 16px" },
 
   heroWrap: { padding: "44px 0 8px", position: "relative", overflow: "hidden" },
@@ -4997,18 +5287,18 @@ const S = {
     fontSize: 11,
     letterSpacing: ".2em",
     textTransform: "uppercase",
-    color: "#6FBF8F",
+    color: "var(--ok)",
     margin: 0,
   },
-  heroSub: { fontSize: "clamp(16px, 2.2vw, 20px)", color: "#E8EFE9", fontWeight: 500, margin: "18px 0 0" },
+  heroSub: { fontSize: "clamp(16px, 2.2vw, 20px)", color: "var(--bone)", fontWeight: 500, margin: "18px 0 0" },
   strip: {
     fontFamily: MONO,
     fontSize: 11,
     letterSpacing: ".05em",
-    color: "#6B7F73",
+    color: "var(--faint)",
     marginTop: 26,
     paddingTop: 14,
-    borderTop: "1px solid #26362E",
+    borderTop: "1px solid var(--line)",
     wordSpacing: ".16em",
     minHeight: 30,
     lineHeight: 1.7,
@@ -5018,35 +5308,45 @@ const S = {
     fontSize: 9,
     letterSpacing: ".12em",
     textTransform: "uppercase",
-    color: "#6B7F73",
+    color: "var(--faint)",
     margin: 0,
   },
-  tileValue: { fontSize: 23, fontWeight: 700, letterSpacing: "-.02em", margin: "6px 0 0", color: "#E8EFE9", lineHeight: 1.1 },
-  tileNote: { fontSize: 11, color: "#8FA396", margin: "3px 0 0" },
-  tileOf: { fontSize: 13, color: "#6B7F73", fontWeight: 500, marginLeft: 2 },
+  tileValue: { fontSize: 23, fontWeight: 700, letterSpacing: "-.02em", margin: "6px 0 0", color: "var(--bone)", lineHeight: 1.1 },
+  tileNote: { fontSize: 11, color: "var(--muted)", margin: "3px 0 0" },
+  tileOf: { fontSize: 13, color: "var(--faint)", fontWeight: 500, marginLeft: 2 },
   dialCap: {
     fontFamily: MONO,
     fontSize: 9,
     letterSpacing: ".16em",
-    color: "#6B7F73",
+    color: "var(--faint)",
     margin: "2px 0 0",
   },
 
   section: {
-    border: "1px solid #26362E",
-    background: "#141E19",
-    padding: "18px 20px 20px",
-    marginBottom: 16,
+    border: "1px solid var(--line)",
+    borderRadius: "var(--r-md)",
+    background: "var(--panel-1)",
+    boxShadow: "var(--bezel)",
+    padding: "var(--s4) var(--s5) var(--s5)",
+    marginBottom: "var(--s4)",
   },
-  h2: { fontSize: 24, fontWeight: 700, letterSpacing: "-.02em", margin: "16px 0 8px" },
+  h2: {
+    fontFamily: DISPLAY,
+    fontSize: 22,
+    fontWeight: 600,
+    letterSpacing: "-.01em",
+    margin: "16px 0 8px",
+  },
+  /* The engraved region label. Was green — green now means a state,
+     so a structural heading has no business wearing it. */
   h3: {
     fontFamily: MONO,
     fontSize: 10,
     fontWeight: 500,
     margin: "0 0 14px",
     textTransform: "uppercase",
-    letterSpacing: ".2em",
-    color: "#6FBF8F",
+    letterSpacing: ".18em",
+    color: "var(--faint)",
   },
 
   list: { paddingLeft: 18, margin: 0 },
@@ -5058,7 +5358,7 @@ const S = {
     fontSize: 10,
     letterSpacing: ".14em",
     textTransform: "uppercase",
-    color: "#6B7F73",
+    color: "var(--faint)",
     marginBottom: 4,
   },
 
@@ -5068,9 +5368,9 @@ const S = {
 
   btn: {
     padding: "9px 16px",
-    border: "1px solid #33473C",
+    border: "1px solid var(--edge)",
     background: "transparent",
-    color: "#E8EFE9",
+    color: "var(--bone)",
     cursor: "pointer",
     marginRight: 8,
     marginBottom: 8,
@@ -5081,8 +5381,8 @@ const S = {
     border: "none",
     background: "none",
     padding: 0,
-    color: "#E8EFE9",
-    borderBottom: "1px solid #33473C",
+    color: "var(--bone)",
+    borderBottom: "1px solid var(--edge)",
     cursor: "pointer",
     fontSize: 14,
     fontFamily: BODY,
@@ -5091,45 +5391,45 @@ const S = {
   table: { borderCollapse: "collapse", width: "100%", marginTop: 10 },
   th: {
     textAlign: "left",
-    borderBottom: "1px solid #33473C",
+    borderBottom: "1px solid var(--edge)",
     padding: "8px 10px 8px 0",
     fontFamily: MONO,
     fontSize: 10,
     fontWeight: 500,
     letterSpacing: ".12em",
     textTransform: "uppercase",
-    color: "#6B7F73",
+    color: "var(--faint)",
   },
-  td: { borderBottom: "1px solid #1B2822", padding: "10px 10px 10px 0", verticalAlign: "top", fontSize: 13 },
+  td: { borderBottom: "1px solid var(--panel-2)", padding: "10px 10px 10px 0", verticalAlign: "top", fontSize: 13 },
 
-  card: { border: "1px solid #26362E", borderRadius: 12, background: "#0D1411", padding: 14, marginBottom: 10 },
+  card: { border: "1px solid var(--line)", borderRadius: "var(--r-md)", background: "var(--panel-0)", padding: 14, marginBottom: 10 },
   pre: { whiteSpace: "pre-wrap", fontFamily: BODY, margin: "6px 0", fontSize: 13 },
 
-  dim: { color: "#6B7F73", fontSize: 12 },
-  late: { color: "#C4705A", fontSize: 12 },
-  ok: { color: "#6FBF8F", fontSize: 12 },
+  dim: { color: "var(--faint)", fontSize: 12 },
+  late: { color: "var(--warn)", fontSize: 12 },
+  ok: { color: "var(--ok)", fontSize: 12 },
 
-  thumb: { maxWidth: "100%", maxHeight: 180, border: "1px solid #33473C", borderRadius: 10, display: "block", marginBottom: 6 },
-  cardImg: { maxWidth: "100%", maxHeight: 340, border: "1px solid #26362E", borderRadius: 10, display: "block", margin: "10px 0" },
+  thumb: { maxWidth: "100%", maxHeight: 180, border: "1px solid var(--edge)", borderRadius: "var(--r-md)", display: "block", marginBottom: 6 },
+  cardImg: { maxWidth: "100%", maxHeight: 340, border: "1px solid var(--line)", borderRadius: "var(--r-md)", display: "block", margin: "10px 0" },
   dropzone: {
-    border: "1px dashed #33473C",
-    borderRadius: 12,
+    border: "1px dashed var(--edge)",
+    borderRadius: "var(--r-md)",
     padding: 18,
     fontFamily: MONO,
     fontSize: 10,
     letterSpacing: ".1em",
     textTransform: "uppercase",
-    color: "#6B7F73",
+    color: "var(--faint)",
     textAlign: "center",
     cursor: "text",
-    background: "#0D1411",
+    background: "var(--panel-0)",
   },
 
-  footer: { borderTop: "1px solid #26362E", marginTop: 30, paddingTop: 14 },
+  footer: { borderTop: "1px solid var(--line)", marginTop: 30, paddingTop: 14 },
   footLink: {
-    border: "1px solid #26362E",
+    border: "1px solid var(--line)",
     background: "none",
-    color: "#6B7F73",
+    color: "var(--faint)",
     fontFamily: MONO,
     fontSize: 10,
     letterSpacing: ".14em",
